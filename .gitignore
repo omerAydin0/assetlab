@@ -1,0 +1,37 @@
+# This repository is the pipeline, never anything it produces.
+#
+# Everything at the root is excluded by default and the source folders are added
+# back by name. An allow-list rather than a deny-list, because a single stray
+# sprite, thumbnail or catalogue database would put extracted third-party art
+# into version control, and git history does not forget.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/assetlab/
+!/rules/
+
+# Per-build rule files name the build they were written for and carry vocabulary
+# read out of its decompiled scripts. They stay on the machine; the repository
+# ships the documented template instead.
+/rules/*
+!/rules/example.json
+
+# ...and inside those folders, source only.
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite*
+*.html
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.ogg
+*.wav
+*.ttf
+*.otf
+*.zip
+*.apk
+*.apkm
+*.xapk

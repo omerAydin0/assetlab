@@ -1,0 +1,722 @@
+"""Stage 4 - classify by evidence instead of filename guessing.
+
+Sources are applied strongest-first so a weak guess can never overwrite a fact:
+
+1. project_dir  - the developer's own folders survived the rip (``_Studio/Gameplay/Items/CrateItem``)
+2. bundle       - Addressables bundle names are developer labels (``ui_orderjourney``)
+3. classid      - Unity component class ids in prefabs/scenes give the true role
+4. graph        - roles propagate down GUID references to the sprites a prefab uses
+5. filename     - naming-convention prefix and keyword tokens, last resort only
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sqlite3
+from collections import defaultdict, deque
+from pathlib import Path
+
+from .core import FOLDER_TYPE, connect
+
+# Unity component class ids are stable across versions.
+CLASS_ROLE = {
+    224: "UI",      # RectTransform - strongest UI signal
+    222: "UI",      # CanvasRenderer
+    223: "UI",      # Canvas
+    198: "VFX",     # ParticleSystem
+    199: "VFX",     # ParticleSystemRenderer
+    23: "3D",       # MeshRenderer
+    33: "3D",       # MeshFilter
+    212: "World2D",  # SpriteRenderer
+}
+ROLE_PRIORITY = ["UI", "VFX", "World2D", "3D"]
+CLASS_ID_RE = re.compile(rb"^--- !u!(\d+) &", re.MULTILINE)
+NAME_PREFIX_RE = re.compile(r"^([a-z][a-z0-9]{2,})_")
+
+# Feature prefixes seen in this corpus map 1:1 onto the Addressables bundles.
+GENERIC_PREFIXES = {"common", "gameplay", "icon", "sprite", "texture", "img", "image", "new",
+                    "level", "levelset", "atlas", "sheet", "temp", "test"}
+HEX_NAME_RE = re.compile(r"^[0-9a-f]{8,}$")
+# `level4`, `stage12`, and terse codes like `m139` are numbering, not feature names.
+NUMBERED_PREFIX_RE = re.compile(
+    r"^(?:(level|levelset|stage|scene|chapter|part|page)\d*|[a-z]\d+)$")
+
+SUBCATEGORY_RULES = [
+    ("Button", ("button", "btn")),
+    ("Popup", ("popup", "dialog", "modal")),
+    ("Panel", ("panel", "window", "frame", "container", "bg_", "background")),
+    ("Icon", ("icon", "badge")),
+    ("Progress", ("progress", "_bar", "meter", "slider", "fill")),
+    ("Currency", ("coin", "currency", "cash", "money", "gold", "gem")),
+    ("Reward", ("reward", "chest", "gift", "prize", "giftbox")),
+    ("Booster", ("booster", "hammer", "rocket", "bomb", "shufle", "shuffle")),
+    ("Particle", ("particle", "fx_", "spark", "shine", "glow", "smoke", "twinkle", "confetti")),
+    ("Text", ("text", "label", "font", "title")),
+    ("Decoration", ("deco", "decor", "border", "ribbon", "star", "ring")),
+]
+
+# Types whose role is settled by what they are, whatever references them. Data-heavy
+# games ship thousands of TextAssets and ScriptableObjects; leaving those unlabelled
+# was the single largest gap measured across the builds this was tested on.
+TYPE_ROLE = {
+    "AudioClip": "Audio",
+    "Font": "Font",
+    "Script": "Script",
+    "Assembly": "Script",
+    "Shader": "Shader",
+    "ShaderVariantCollection": "Shader",
+    "Material": "Material",
+    "AnimationClip": "Animation",
+    "AnimatorController": "Animation",
+    "Mesh": "Mesh",
+    "TextAsset": "Data",
+    "MonoBehaviour": "Data",
+}
+
+
+# Gameplay-mechanic detection. The level corpus already names which layers are
+# obstacles (Paper, Package, Safe, Window...), and those names line up with the
+# developer's own art folders (Gameplay/Items/CrateItem), so obstacle art can be
+# labelled from evidence instead of guessed at.
+MECHANIC_DIRS = {"items", "item", "obstacles", "obstacle", "shelves", "shelf",
+                 "boosters", "booster", "goal", "goals"}
+# Last-resort words, used only when no level data or item folders exist.
+OBSTACLE_WORDS = ("obstacle", "blocker", "crate", "chain", "cage", "vine", "curtain",
+                  "blind", "cobweb", "wrapped")
+
+
+# Split on separators and camelCase: `Blocks-Curtain-curtain_sheet_1` -> Blocks,
+# Curtain, curtain, sheet, 1. Naming styles differ per studio, so the obstacle
+# vocabulary from the level corpus is matched against every token, not just the first.
+TOKEN_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def name_tokens(name: str) -> list[str]:
+    return [token for token in TOKEN_SPLIT_RE.split(name) if token]
+
+
+def normalise_mechanic(name: str) -> str:
+    """`CrateItem`, `crateitem_icon`, `Crate3` -> `crate` so sources can be matched."""
+    text = re.sub(r"[^a-z0-9]+", "", name.lower())
+    text = re.sub(r"\d+$", "", text)
+    for suffix in ("prefabs", "prefab", "views", "view", "items", "item"):
+        if text.endswith(suffix) and len(text) > len(suffix):
+            text = text[: -len(suffix)]
+            break
+    return text
+
+
+GENERIC_MECHANIC_NAMES = {"view", "views", "prefab", "prefabs", "common", "base",
+                          "default", "shared", "sprites", "textures", "art",
+                          "config", "configs", "data", "settings", "resources"}
+
+
+def mechanic_from_project_dir(rel_path: str) -> str | None:
+    """`_Studio/Gameplay/Items/CrateItem/x.prefab` -> `CrateItem`."""
+    parts = Path(rel_path).parts[:-1]
+    for index, part in enumerate(parts[:-1]):
+        if part.lower() in MECHANIC_DIRS:
+            candidate = parts[index + 1].lstrip("_")
+            if candidate and candidate.lower() not in GENERIC_MECHANIC_NAMES:
+                return candidate
+            return None
+    return None
+
+
+# IL2CPP games decompile to C# where the design vocabulary is written down as enums:
+# `BoosterType` lists the boosters, and the board pieces live in the item/goal enums.
+# Reading those beats guessing from art names, and the patterns are C# convention
+# rather than any one game.
+#
+# Scanning only `StaticItemType`-style names badly undercounts: one build keeps its
+# 20 cell overlays there but its 113 board pieces in `ItemType` and 105 clearable
+# targets in `GoalType`, so a game with a new blocker every twenty levels looked
+# like it had fifteen. The board vocabulary is the union of all three.
+ENUM_RE = re.compile(r"\benum\s+(\w+)\s*\{(.*?)\}", re.S)
+ENUM_MEMBER_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?:=\s*-?\d+)?\s*,?\s*$", re.M)
+BOOSTER_ENUM_RE = re.compile(r"booster", re.I)
+BOARD_ENUM_RE = re.compile(
+    r"(?:item|obstacle|static|overlay|blocker|goal|brick|block|cell)\w*type$", re.I)
+# Every build also names menus, shops and telemetry with the same `...ItemType`
+# suffix; those enums describe the interface, not the board, and letting them in
+# turns shop rows and tooltip icons into obstacles.
+NON_BOARD_ENUM_RE = re.compile(
+    r"audio|haptic|reward|offer|shop|dialog|tooltip|icon|view|panel|button|section|"
+    r"invite|metric|easing|bundle|event|feature|config|origin|sort|stat|mission|"
+    r"package|privacy|term|scroll|card|tutorial|theme|music|particle|border|"
+    r"currency|purchase|store|notification|analytic|log|error|state|anim|tween|"
+    r"profile|inventory|sale|chat|team|player|row|daily|deal|warning|content|flow|"
+    r"source|activation|atlas|mask|position|group|slot|fortune|modifier|special|"
+    r"generated|layer|fade|admin|debug|test",
+    re.I)
+# Geometry and bookkeeping members carry no design meaning, and a directional name
+# would otherwise swallow every `*_left` / `*_top` art file in the build.
+IGNORED_ENUM_MEMBERS = {"none", "count", "max", "min", "default", "unknown", "obsolete",
+                        "left", "right", "top", "bottom", "up", "down", "center",
+                        "middle", "horizontal", "vertical", "first", "last", "all",
+                        "normal", "small", "big", "large", "single", "double",
+                        # The board's own colours are the match pieces, not blockers.
+                        "match", "blue", "green", "orange", "red", "pink", "yellow",
+                        "purple", "cyan", "white", "black", "brown", "grey", "gray",
+                        "rainbow", "color", "colour", "random", "empty", "any",
+                        "pair", "block", "item", "items", "cell", "tile", "goal"}
+
+
+
+MAX_VOCABULARY_SPAN = 3
+
+
+def match_vocabulary(name: str, vocabulary: dict[str, str]) -> str | None:
+    """Key of the longest run of adjacent name tokens that spells a design word.
+
+    The normalised key is returned rather than the text that spelled it, because
+    `BirdNest`, `BirdNestItem` and `bird_nest_02` all name the same piece and the
+    caller wants one answer for all three.
+    """
+    tokens = name_tokens(name)
+    for span in range(min(MAX_VOCABULARY_SPAN, len(tokens)), 0, -1):
+        for start in range(len(tokens) - span + 1):
+            key = normalise_mechanic("".join(tokens[start:start + span]))
+            if key in vocabulary:
+                return key
+    return None
+
+def scan_design_enums(assets_root: Path) -> dict[str, dict[str, str]]:
+    """Return {'Booster': {normalised: display}, 'Obstacle': {...}} from decompiled C#."""
+    found: dict[str, dict[str, str]] = {"Booster": {}, "Obstacle": {}}
+    scripts = assets_root / "Scripts"
+    if not scripts.is_dir():
+        return found
+    for path in scripts.rglob("*Type*.cs"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name, body in ENUM_RE.findall(text):
+            if BOOSTER_ENUM_RE.search(name):
+                bucket = "Booster"
+            elif BOARD_ENUM_RE.search(name) and not NON_BOARD_ENUM_RE.search(name):
+                bucket = "Obstacle"
+            else:
+                continue
+            for member in ENUM_MEMBER_RE.findall(body):
+                key = normalise_mechanic(member)
+                if key and member.lower() not in IGNORED_ENUM_MEMBERS and len(key) > 2:
+                    found[bucket].setdefault(key, member)
+    return found
+
+
+def obstacle_families(conn: sqlite3.Connection) -> dict[str, str]:
+    """normalised name -> display name, taken from the parsed level corpus."""
+    families: dict[str, str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT obstacle_layers FROM levels WHERE obstacle_layers <> ''").fetchall()
+    except sqlite3.OperationalError:
+        return families
+    for row in rows:
+        for raw in row[0].split(","):
+            display = re.sub(r"\d+$", "", raw.strip())
+            key = normalise_mechanic(display)
+            if key:
+                families.setdefault(key, display)
+    return families
+
+
+def load_rules(path: Path | None) -> dict:
+    """Optional per-game labelling layer.
+
+    Everything above this point is derived from evidence in the build. A rules file
+    only adds human knowledge on top - readable names for a feature, which features
+    belong to the same part of the game, obstacles the level data does not name. It
+    lives in a data file so the code stays free of per-game branches.
+
+    Recognised keys: feature_aliases, feature_groups, mechanic_aliases,
+    extra_obstacles, ignore_features.
+    """
+    if path is None or not Path(path).is_file():
+        return {}
+    try:
+        rules = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"  warning: could not read rules {path}: {error}")
+        return {}
+    rules["_feature_alias_map"] = {
+        key.lower(): value for key, value in (rules.get("feature_aliases") or {}).items()}
+    rules["_mechanic_alias_map"] = {
+        normalise_mechanic(key): value
+        for key, value in (rules.get("mechanic_aliases") or {}).items()}
+    rules["_group_of"] = {
+        member.lower(): group
+        for group, members in (rules.get("feature_groups") or {}).items()
+        for member in members}
+    rules["_ignore"] = {name.lower() for name in (rules.get("ignore_features") or [])}
+    return rules
+
+
+# Multi-part obstacle art is authored as edge and corner pieces that only make sense
+# assembled: `paper_icon_top` is a 1217x60 strip on its own. Grouping them by their
+# shared stem lets the browser lay the set out in its 3x3 arrangement.
+POSITION_WORDS = {
+    "topleft": "tl", "lefttop": "tl", "topright": "tr", "righttop": "tr",
+    "bottomleft": "bl", "leftbottom": "bl", "bottomright": "br", "rightbottom": "br",
+    "tl": "tl", "tr": "tr", "bl": "bl", "br": "br",
+    "top": "t", "up": "t", "upper": "t", "bottom": "b", "down": "b", "lower": "b",
+    "left": "l", "right": "r", "side": "l",
+    "center": "c", "centre": "c", "middle": "c", "mid": "c",
+}
+VARIANT_TOKEN_RE = re.compile(r"^\d+$")
+# A stem this generic describes the shape of a piece, not which obstacle it belongs
+# to, so grouping on it merges unrelated art from all over the build.
+GENERIC_STEMS = {"corner", "pin", "part", "parts", "edge", "bar", "line", "dot",
+                 "piece", "pieces", "icon", "bg", "frame", "border", "side", "cap"}
+
+
+def piece_of(name: str) -> tuple[str, str] | None:
+    """('paper_icon_top', ...) -> (stem, 't'); None when the name has no position."""
+    tokens = name_tokens(name)
+    position, stem = None, []
+    for index, token in enumerate(tokens):
+        lowered = token.lower()
+        # `top_left` written as two tokens should read as one corner.
+        if position is None and index + 1 < len(tokens):
+            pair = lowered + tokens[index + 1].lower()
+            if pair in POSITION_WORDS and lowered in POSITION_WORDS:
+                position = POSITION_WORDS[pair]
+                continue
+        if position is None and lowered in POSITION_WORDS:
+            position = POSITION_WORDS[lowered]
+            continue
+        if lowered in POSITION_WORDS and position is not None:
+            continue
+        stem.append(lowered)
+    # Only trailing numbers are variant markers (`..._part_3`). A leading one is an
+    # identifier - `00300_A_left_arm` and `03300_A_right_arm` are different assets.
+    while stem and VARIANT_TOKEN_RE.match(stem[-1]):
+        stem.pop()
+    return ("_".join(stem), position) if position and stem else None
+
+
+def build_piece_groups(rows: list[sqlite3.Row], mechanics: dict[int, str]) -> list[dict]:
+    buckets: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for row in rows:
+        found = piece_of(row["name"] or "")
+        if not found:
+            continue
+        stem, position = found
+        key = f"{mechanics.get(row['id']) or '-'}|{stem}"
+        buckets[key].append((row["id"], position))
+    groups = []
+    for key, members in buckets.items():
+        mechanic, stem = key.split("|", 1)
+        # One piece is not a set, and neither is the same position repeated.
+        if len(members) < 2 or len({position for _, position in members}) < 2:
+            continue
+        if len(stem) < 4 or (mechanic == "-" and stem in GENERIC_STEMS):
+            continue
+        groups.extend({"group_key": key, "asset_id": asset_id, "position": position}
+                      for asset_id, position in members)
+    return groups
+
+
+def add(tags: list[dict], asset_id: int, kind: str, value: str, confidence: str, source: str) -> None:
+    if value:
+        tags.append({"asset_id": asset_id, "kind": kind, "value": value,
+                     "confidence": confidence, "source": source})
+
+
+# AssetRipper groups ripped assets into type-named folders; anything else at the
+# top level is a folder the developer authored and therefore a real label.
+ENGINE_ROOTS = set(FOLDER_TYPE) | {
+    "scripts", "plugins", "resources", "editor", "packages", "streamingassets",
+    "textmesh pro", "textmeshpro", "standard assets", "assetbundle", "prefabinstance",
+    "shadervariantcollection", "spriteatlas", "lightingdatta", "navmeshdata",
+}
+GENERIC_DIRS = {"prefab", "prefabs", "sprites", "sprite", "textures", "texture",
+                "assets", "materials", "material", "atlas", "atlases", "art",
+                "images", "ui", "graphics", "gfx"}
+
+
+def feature_from_project_dir(rel_path: str) -> tuple[str | None, str | None]:
+    """`_Studio/Gameplay/Items/CrateItem/x.prefab` -> ('CrateItem', 'Items')."""
+    parts = Path(rel_path).parts
+    if len(parts) < 2 or parts[0].lower() in ENGINE_ROOTS:
+        return None, None
+    meaningful = [part for part in parts[1:-1] if part.lower() not in GENERIC_DIRS]
+    if not meaningful:
+        # A developer folder with no sub-structure still names the feature.
+        stripped = parts[0].lstrip("_")
+        return (stripped, None) if stripped else (None, None)
+    return meaningful[-1], (meaningful[-2] if len(meaningful) > 1 else None)
+
+
+def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
+    """basename (lowercase) -> (bundle name, original project path).
+
+    Bundle names in the Primary Content export are content hashes, so the useful
+    label is the developer path recorded in ``m_Container``
+    (``Assets/_Studio/LiveOps/SummerEvent/Assets/SummerEventAtlas.spriteatlas``).
+    """
+    if not primary_content:
+        return {}
+    bundle_dir = primary_content / "AssetBundle"
+    if not bundle_dir.is_dir():
+        return {}
+    mapping: dict[str, tuple[str, str]] = {}
+    for path in bundle_dir.glob("*.bundle.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        name = data.get("m_AssetBundleName") or path.stem
+        for project_path in (data.get("m_Container") or {}):
+            mapping[Path(project_path).stem.lower()] = (name, project_path)
+    return mapping
+
+
+def feature_from_container_path(project_path: str) -> str | None:
+    """`Assets/_Studio/LiveOps/SummerEvent/Assets/x.spriteatlas` -> 'SummerEvent'."""
+    skip = {"assets", "prefab", "prefabs", "sprites", "textures", "materials",
+            "atlas", "atlases", "ui", "art", "resources"}
+    parts = [part for part in Path(project_path).parts[:-1]
+             if part.lower() not in skip and not part.startswith("_")]
+    return parts[-1] if parts else None
+
+
+def scan_prefab_roles(assets_root: Path, conn: sqlite3.Connection) -> dict[str, list[str]]:
+    roles: dict[str, list[str]] = {}
+    rows = conn.execute(
+        "SELECT guid, rel_path FROM assets WHERE unity_type IN ('Prefab','Scene') AND guid IS NOT NULL"
+    ).fetchall()
+    for row in rows:
+        try:
+            blob = (assets_root / row["rel_path"]).read_bytes()
+        except OSError:
+            continue
+        found = {CLASS_ROLE[int(cid)] for cid in CLASS_ID_RE.findall(blob)
+                 if int(cid) in CLASS_ROLE}
+        if found:
+            roles[row["guid"]] = [role for role in ROLE_PRIORITY if role in found]
+    return roles
+
+
+def propagate(conn: sqlite3.Connection, holder_roles: dict[str, list[str]],
+              max_depth: int = 6) -> tuple[dict[str, set[str]], list[dict]]:
+    """Walk GUID references from each prefab/scene down to the assets it uses."""
+    adjacency: dict[str, list[str]] = defaultdict(list)
+    for src, dst in conn.execute("SELECT src_guid, dst_guid FROM refs"):
+        adjacency[src].append(dst)
+
+    holder_info = {
+        row["guid"]: (row["name"], row["unity_type"])
+        for row in conn.execute(
+            "SELECT guid, name, unity_type FROM assets WHERE unity_type IN ('Prefab','Scene')"
+        )
+    }
+    asset_id_by_guid = {
+        row["guid"]: row["id"]
+        for row in conn.execute("SELECT id, guid FROM assets WHERE guid IS NOT NULL")
+    }
+
+    inherited: dict[str, set[str]] = defaultdict(set)
+    usage: list[dict] = []
+    for holder, roles in holder_roles.items():
+        seen = {holder}
+        queue = deque((child, 1) for child in adjacency.get(holder, ()))
+        name, holder_type = holder_info.get(holder, (None, None))
+        while queue:
+            guid, depth = queue.popleft()
+            if guid in seen:
+                continue
+            seen.add(guid)
+            inherited[guid].update(roles)
+            if guid in asset_id_by_guid:
+                usage.append({"asset_id": asset_id_by_guid[guid], "holder_guid": holder,
+                              "holder_name": name, "holder_type": holder_type})
+            if depth < max_depth:
+                queue.extend((child, depth + 1) for child in adjacency.get(guid, ()))
+    return inherited, usage
+
+
+
+def mechanics_from_holders(usage: list[dict],
+                           vocabulary: dict[str, str]) -> dict[int, str]:
+    """asset id -> the one design word every prefab that uses it agrees on.
+
+    Assets whose holders disagree are left alone: a shared glow or white pixel
+    belongs to no single obstacle, and guessing one would scatter it across the
+    obstacle list.
+    """
+    if not vocabulary:
+        return {}
+    word_of: dict[str, str] = {}
+    votes: dict[int, set[str]] = defaultdict(set)
+    for link in usage:
+        holder = link.get("holder_name")
+        if not holder:
+            continue
+        if holder not in word_of:
+            word_of[holder] = match_vocabulary(holder, vocabulary) or ""
+        if word_of[holder]:
+            votes[link["asset_id"]].add(word_of[holder])
+    return {asset_id: next(iter(words))
+            for asset_id, words in votes.items() if len(words) == 1}
+
+def classify(assets_root: Path, primary_content: Path | None,
+             conn: sqlite3.Connection, rules_path: Path | None = None) -> dict[str, int]:
+    bundle_map = load_bundle_map(primary_content)
+    rules = load_rules(rules_path)
+    families = obstacle_families(conn)
+    enums = scan_design_enums(assets_root)
+    families.update(enums["Obstacle"])
+    boosters = dict(enums["Booster"])
+    for extra in (rules.get("extra_obstacles") or []):
+        families.setdefault(normalise_mechanic(extra), extra)
+    for extra in (rules.get("extra_boosters") or []):
+        boosters.setdefault(normalise_mechanic(extra), extra)
+    if enums["Booster"] or enums["Obstacle"]:
+        print(f"  design enums: {len(enums['Booster'])} boosters, "
+              f"{len(enums['Obstacle'])} obstacles")
+    holder_roles = scan_prefab_roles(assets_root, conn)
+    inherited, usage = propagate(conn, holder_roles)
+    vocabulary = {**families, **boosters}
+    mechanic_by_graph = mechanics_from_holders(usage, vocabulary)
+
+    tags: list[dict] = []
+    primary_rows: list[dict] = []
+    assets = conn.execute(
+        "SELECT id, guid, rel_path, name, unity_type, ext FROM assets").fetchall()
+    resolved = 0
+
+    for row in assets:
+        asset_id, guid = row["id"], row["guid"]
+        rel_path, name = row["rel_path"], row["name"] or ""
+        unity_type = row["unity_type"]
+        lowered = name.lower()
+
+        # 1. developer project folders
+        primary_feature: str | None = None
+        feature, group = feature_from_project_dir(rel_path)
+        if feature:
+            add(tags, asset_id, "feature", feature, "high", "project_dir")
+            primary_feature = feature
+            if group:
+                add(tags, asset_id, "group", group, "high", "project_dir")
+
+        # 2. Addressables bundle provenance
+        bundle_role: str | None = None
+        entry = bundle_map.get(lowered)
+        if entry:
+            bundle, project_path = entry
+            add(tags, asset_id, "bundle", bundle, "high", "bundle")
+            add(tags, asset_id, "container_path", project_path, "high", "bundle")
+            container_feature = feature_from_container_path(project_path)
+            if container_feature:
+                add(tags, asset_id, "feature", container_feature, "high", "bundle")
+                primary_feature = primary_feature or container_feature
+            lowered_path = project_path.lower()
+            if "/ui/" in lowered_path or "/liveops/" in lowered_path:
+                bundle_role = "UI"
+            elif "particle" in lowered_path or "/vfx/" in lowered_path:
+                bundle_role = "VFX"
+
+        # 3. filename convention, weakest evidence
+        prefix = NAME_PREFIX_RE.match(lowered)
+        if prefix:
+            candidate = prefix.group(1)
+            if (candidate not in GENERIC_PREFIXES and not HEX_NAME_RE.match(candidate)
+                    and not NUMBERED_PREFIX_RE.match(candidate)):
+                add(tags, asset_id, "feature", candidate, "medium", "filename")
+                primary_feature = primary_feature or candidate
+        for subcategory, tokens in SUBCATEGORY_RULES:
+            if any(token in lowered for token in tokens):
+                add(tags, asset_id, "subcategory", subcategory, "low", "filename")
+                break
+
+        # 3b. gameplay mechanic, and whether the level data calls it an obstacle
+        primary_mechanic: str | None = None
+        mechanic = mechanic_from_project_dir(rel_path)
+        mechanic_source, mechanic_confidence = "project_dir", "high"
+        if not mechanic and vocabulary:
+            # Enum members are compounds - `DynamiteBox`, `BirdNest`, `IceCrusher` -
+            # so a single token never matches them and only the plainest one-word
+            # blockers were ever found. Runs of adjacent tokens are tried longest
+            # first, so `dynamite_box_icon` binds to DynamiteBox and not to Box.
+            found = match_vocabulary(name, vocabulary)
+            if found:
+                mechanic, mechanic_source, mechanic_confidence = (
+                    found, "filename+design", "medium")
+            elif asset_id in mechanic_by_graph:
+                # An obstacle's art is usually packed onto an atlas named after
+                # something else entirely, so its own name says nothing. What does
+                # know is the prefab that uses it.
+                mechanic, mechanic_source, mechanic_confidence = (
+                    vocabulary[mechanic_by_graph[asset_id]], "graph", "medium")
+        if mechanic:
+            key = normalise_mechanic(mechanic)
+            display = vocabulary.get(key, mechanic)
+            add(tags, asset_id, "mechanic", display, mechanic_confidence, mechanic_source)
+            primary_mechanic = display
+            # A booster and a blocker are different things; the game's own enums say
+            # which is which, so neither is inferred from art names when they exist.
+            if key in boosters:
+                add(tags, asset_id, "category", "Booster", "high", "enums")
+            elif key in enums["Obstacle"]:
+                add(tags, asset_id, "category", "Obstacle", "high", "enums")
+            elif key in families:
+                add(tags, asset_id, "category", "Obstacle", "high", "levels")
+        elif not vocabulary and any(word in lowered for word in OBSTACLE_WORDS):
+            add(tags, asset_id, "category", "Obstacle", "low", "filename")
+
+        # 4. role, strongest evidence first. An asset whose Unity type already
+        #    determines its role (audio, font, script...) must not be relabelled
+        #    UI just because a UI prefab happens to reference it.
+        role: str | None = TYPE_ROLE.get(unity_type)
+        if role:
+            add(tags, asset_id, "role", role, "high", "type")
+        elif rel_path.startswith("Resources/levelset"):
+            role = "Level"
+            add(tags, asset_id, "role", role, "high", "project_dir")
+        elif guid and guid in holder_roles:
+            for value in holder_roles[guid]:
+                add(tags, asset_id, "role", value, "high", "classid")
+            role = holder_roles[guid][0]
+        elif bundle_role:
+            role = bundle_role
+            add(tags, asset_id, "role", role, "high", "bundle")
+        elif guid and guid in inherited:
+            ordered = [value for value in ROLE_PRIORITY if value in inherited[guid]]
+            for value in ordered:
+                add(tags, asset_id, "role", value, "medium", "graph")
+            role = ordered[0] if ordered else None
+        if role is None and unity_type in {"Sprite", "Texture2D"}:
+            role = "UI"
+            add(tags, asset_id, "role", role, "low", "filename")
+        if role is None and (row["ext"] or "").lower() in {"json", "xml", "csv", "tsv", "txt"}:
+            # Catalogs indexed before loose data files were typed still land here.
+            role = "Data"
+            add(tags, asset_id, "role", role, "medium", "type")
+        if role is None and unity_type in {"Prefab", "Scene"}:
+            # No renderer component anywhere in it: still a prefab, just not a visual
+            # one (spawners, controllers, data holders).
+            role = "Logic"
+            add(tags, asset_id, "role", role, "medium", "classid")
+        if role:
+            resolved += 1
+        # 5. optional per-game rules, applied last so they can only rename or group
+        #    what the evidence already found.
+        if rules:
+            if primary_feature and primary_feature.lower() in rules["_ignore"]:
+                primary_feature = None
+            if primary_feature:
+                primary_feature = rules["_feature_alias_map"].get(
+                    primary_feature.lower(), primary_feature)
+                group = rules["_group_of"].get(primary_feature.lower())
+                if group:
+                    add(tags, asset_id, "feature_group", group, "high", "rules")
+            if primary_mechanic:
+                primary_mechanic = rules["_mechanic_alias_map"].get(
+                    normalise_mechanic(primary_mechanic), primary_mechanic)
+
+        primary_rows.append({"id": asset_id, "primary_role": role,
+                             "primary_feature": primary_feature,
+                             "primary_mechanic": primary_mechanic})
+
+    if rules:
+        # Rewrite in place rather than adding alongside, so a renamed feature does
+        # not show up twice and an ignored one really disappears.
+        rewritten, seen = [], set()
+        for tag in tags:
+            if tag["kind"] == "feature":
+                lowered = tag["value"].lower()
+                if lowered in rules["_ignore"]:
+                    continue
+                tag["value"] = rules["_feature_alias_map"].get(lowered, tag["value"])
+            elif tag["kind"] == "mechanic":
+                tag["value"] = rules["_mechanic_alias_map"].get(
+                    normalise_mechanic(tag["value"]), tag["value"])
+            key = (tag["asset_id"], tag["kind"], tag["value"], tag["source"])
+            if key not in seen:
+                seen.add(key)
+                rewritten.append(tag)
+        tags = rewritten
+
+    conn.execute("DELETE FROM tags")
+    conn.execute("DELETE FROM used_by")
+    conn.executemany(
+        """UPDATE assets SET primary_role=:primary_role, primary_feature=:primary_feature,
+               primary_mechanic=:primary_mechanic WHERE id=:id""",
+        primary_rows)
+
+    mechanic_of = {row["id"]: row["primary_mechanic"] for row in primary_rows}
+    pieces = build_piece_groups(
+        conn.execute("""SELECT id, name FROM assets
+                         WHERE image_path IS NOT NULL AND name IS NOT NULL""").fetchall(),
+        mechanic_of)
+    conn.execute("DELETE FROM piece_groups")
+    conn.executemany(
+        """INSERT OR REPLACE INTO piece_groups (group_key, asset_id, position)
+           VALUES (:group_key, :asset_id, :position)""", pieces)
+    conn.executemany(
+        """INSERT OR IGNORE INTO tags (asset_id, kind, value, confidence, source)
+           VALUES (:asset_id, :kind, :value, :confidence, :source)""", tags)
+    conn.executemany(
+        """INSERT OR IGNORE INTO used_by (asset_id, holder_guid, holder_name, holder_type)
+           VALUES (:asset_id, :holder_guid, :holder_name, :holder_type)""", usage)
+    conn.commit()
+    return {"tags": len(tags), "usage_links": len(usage), "resolved": resolved,
+            "total": len(assets), "prefabs_scanned": len(holder_roles)}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Classify assets by evidence.")
+    parser.add_argument("--export", required=True, type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--primary-content", type=Path, default=None,
+                        help="Optional Primary Content Assets dir (for AssetBundle provenance)")
+    parser.add_argument("--rules", type=Path, default=None,
+                        help="per-game labelling rules; defaults to rules/<out name>.json")
+    args = parser.parse_args()
+
+    rules_path = args.rules or Path("rules") / f"{args.out.name}.json"
+    if rules_path.is_file():
+        print(f"rules      {rules_path}")
+    conn = connect(args.out / "assetlab.db")
+    stats = classify(args.export.resolve(),
+                     args.primary_content.resolve() if args.primary_content else None,
+                     conn, rules_path)
+    unresolved = stats["total"] - stats["resolved"]
+    print(f"tags={stats['tags']}  usage_links={stats['usage_links']}  "
+          f"prefabs_scanned={stats['prefabs_scanned']}")
+    print(f"unclassified: {unresolved}/{stats['total']} "
+          f"({unresolved / max(stats['total'], 1):.1%})")
+    print("roles:")
+    for row in conn.execute(
+        """SELECT value, COUNT(DISTINCT asset_id) n FROM tags WHERE kind='role'
+           GROUP BY value ORDER BY n DESC"""):
+        print(f"  {row['value']:<12} {row['n']}")
+    print("top features:")
+    for row in conn.execute(
+        """SELECT value, COUNT(DISTINCT asset_id) n FROM tags WHERE kind='feature'
+           GROUP BY value ORDER BY n DESC LIMIT 12"""):
+        print(f"  {row['value']:<20} {row['n']}")
+    mechanics = conn.execute(
+        """SELECT value, COUNT(DISTINCT asset_id) n FROM tags WHERE kind='mechanic'
+           GROUP BY value ORDER BY n DESC LIMIT 20""").fetchall()
+    if mechanics:
+        obstacles = {row["value"] for row in conn.execute(
+            """SELECT DISTINCT m.value FROM tags m
+                 JOIN tags c ON c.asset_id = m.asset_id AND c.kind='category'
+                                AND c.value='Obstacle'
+                WHERE m.kind='mechanic'""")}
+        print("mechanics (* = obstacle per the level corpus):")
+        for row in mechanics:
+            mark = "*" if row["value"] in obstacles else " "
+            print(f"  {mark} {row['value']:<20} {row['n']}")
+    conn.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "Optional per-build labelling rules. Save as rules/<out folder name>.json and",
+    "run.py picks it up automatically, or pass --rules explicitly.",
+    "",
+    "Rules are additive and never invent a classification. Everything here adjusts",
+    "labels the evidence already produced: bundle provenance, prefab class ids, the",
+    "reference graph, and the design enums in decompiled scripts. If a build ships",
+    "no rules file at all, nothing is lost - this only exists for the cases where a",
+    "build's own naming is ambiguous or its scripts do not spell something out.",
+    "",
+    "Delete the keys you do not need; every one of them is optional."
+  ],
+
+  "_feature_aliases": "raw folder name -> the label you want to see",
+  "feature_aliases": {
+    "icons": "Icons",
+    "shop": "Shop"
+  },
+
+  "_feature_groups": "label -> the features it collects, for coarser filtering",
+  "feature_groups": {
+    "Board": ["Items", "Cells", "Boosters"],
+    "Meta": ["Shop", "Icons"]
+  },
+
+  "_ignore_features": "folder names that carry no meaning in this build",
+  "ignore_features": ["common", "shared"],
+
+  "_extra_obstacles": [
+    "Board pieces to badge as obstacles when the build gives no evidence of its own -",
+    "no Tiled level corpus, and no item/goal enum in its scripts. Names are matched",
+    "loosely, so 'DynamiteBox' also catches dynamite_box_icon_02."
+  ],
+  "extra_obstacles": [],
+
+  "_extra_boosters": [
+    "Same, for power-ups. Needed when a build has no BoosterType enum: without it",
+    "its bombs and rockets are read as blockers, because that is what the item enum",
+    "lists them as."
+  ],
+  "extra_boosters": []
+}
