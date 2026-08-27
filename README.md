@@ -25,7 +25,8 @@ It deliberately does not: redistribute or upload extracted assets, decompile or
 reconstruct game source, modify or re-sign packages, or touch anything server-side.
 The catalogue it produces is for looking at, on the machine that produced it.
 
-No licence is granted. This is published as a record of the engineering.
+MIT licensed. The licence covers this code and nothing it reads: what a build
+contains belongs to whoever made it, and extracting something does not change that.
 
 ## Requirements
 
