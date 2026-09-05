@@ -35,3 +35,8 @@ __pycache__/
 *.apk
 *.apkm
 *.xapk
+
+# Graphify builds a knowledge graph of this package into a folder beside it. It is
+# a local index that is rebuilt from the source on demand, and it carries a copy of
+# every docstring - derived output, not source.
+graphify-out/

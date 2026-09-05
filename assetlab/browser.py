@@ -87,6 +87,27 @@ button.close{background:none;border:1px solid var(--line);color:var(--dim);borde
 .vtab.on{background:var(--accent);color:#0d1117;border-color:var(--accent)}
 aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);
  margin:16px 0 6px;font-weight:600}
+/* A model has no picture of itself - what can be shown is the surface it is drawn
+   with, so the swatch and the texture set stand in for a render. */
+.swatch{display:inline-block;width:26px;height:26px;border-radius:5px;
+ border:1px solid var(--line);vertical-align:middle;margin-right:8px}
+.matrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;
+ border-bottom:1px solid var(--line)}
+.matrow:last-child{border-bottom:0}
+.matrow b{font-weight:500;font-size:12px}
+.render{width:100%;aspect-ratio:1;background:#0e1014;border-radius:5px;
+  object-fit:contain;display:block}
+/* The grid these sit in is itself a grid, so both must span every column or they
+   line up beside the cards instead of above them. */
+.scenestrip{grid-column:1/-1;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin:0 0 22px}
+.scenehead{grid-column:1/-1;font:600 13px/1.5 inherit;color:var(--dim);
+  letter-spacing:.04em;text-transform:uppercase;margin:0 0 10px}
+.modelshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ align-items:center;justify-content:center;gap:4px;padding:5px;overflow:hidden}
+.modelshots img{width:auto;height:auto;max-width:46%;max-height:100%;
+ object-fit:contain;background:none;border-radius:0}
+.modelshots .flat{width:44px;height:44px;border-radius:8px;border:1px solid var(--line)}
 aside h3 span{text-transform:none;letter-spacing:0;color:var(--dim);font-weight:400;
  margin-left:8px;font-size:12px}
 /* An obstacle card shows several of its parts, so a set is recognisable as a set
@@ -112,7 +133,8 @@ aside.wide{width:min(900px,96vw)}
   <h1>__TITLE__ <span style="color:var(--dim);font-weight:400">— asset research library</span></h1>
   <div class="controls">
     <span><button class="vtab on" data-view="assets">assets</button><button
-      class="vtab" data-view="obstacles">obstacles</button></span>
+      class="vtab" data-view="obstacles">obstacles</button><button
+      class="vtab" data-view="models" id="modelstab">models</button></span>
     <input type="search" id="q" placeholder="search name / path…">
     <select id="role"></select><select id="feature"></select>
     <select id="mechanic"></select><select id="type"></select>
@@ -123,8 +145,11 @@ aside.wide{width:min(900px,96vw)}
     </select>
     <label class="chk"><input type="checkbox" id="dups"> duplicates only</label>
     <label class="chk"><input type="checkbox" id="imgs" checked> previewable only</label>
+    <label class="chk"><input type="checkbox" id="atlas" checked> hide atlas sheets</label>
+    <label class="chk"><input type="checkbox" id="eng" checked> hide engine assets</label>
     <span id="count"></span>
   </div>
+  <div id="profile" style="color:var(--dim);font-size:12px;margin-top:7px"></div>
 </header>
 <main><div class="grid" id="grid"></div></main>
 <aside id="panel"></aside>
@@ -137,6 +162,14 @@ const el = id => document.getElementById(id);
 // measured against every other active filter - "images only" above all, which is on
 // by default and hides materials, scripts and other imageless assets.
 function passes(d, skipKey){
+  // An atlas sheet is the page its sprites were cut from, not a piece of art. In a
+  // build with thousands of sprites they vanish into the grid; in one with a few
+  // hundred they are a third of what you see.
+  if (el("atlas").checked && d.at) return false;
+  // Unity and its packages ship art of their own - dither tables, the Rendering
+  // Debugger's widgets - which lands in the same folders as the studio's and sorts
+  // to the front because it is tiny. It is in the catalogue, just not in the way.
+  if (el("eng").checked && d.eng) return false;
   if (el("imgs").checked && !d.kind) return false;
   if (el("dups").checked && !d.dup) return false;
   for (const k of F) { if (k === skipKey) continue;
@@ -498,6 +531,86 @@ function preview(d){
   return "";
 }
 
+// ---- model view -----------------------------------------------------------
+// A 3D build has no sprite to show for its art. What it does have is a mesh drawn
+// through materials, and a material is either a set of textures or a flat colour -
+// in the build this was written for, half the models are colour and no texture at
+// all. Both are rendered here, because showing only textures would show half.
+const MODELS = __MODELS__;
+const SCENES = __SCENES__;
+const PROFILE = __PROFILE__;
+
+function swatch(colour){
+  return colour ? `<span class="swatch" style="background:${colour.hex}"
+    title="${colour.hex}"></span>` : "";
+}
+// A model's own picture beats anything its materials can show. The texture strip
+// stays as the fallback for geometry the renderer could not read - a mesh whose data
+// lives in an external .resS, say - because half a card is better than none.
+function materialStrip(model){
+  const shots = [];
+  for (const material of model.materials){
+    for (const texture of material.textures.slice(0, 2))
+      shots.push(`<img loading="lazy" src="${texture.img}" title="${texture.name}">`);
+    if (!material.textures.length && material.colour)
+      shots.push(`<div class="flat" style="background:${material.colour.hex}"></div>`);
+  }
+  return `<div class="modelshots">${shots.slice(0, 4).join("")
+    || `<span style="color:#5c6675">no material</span>`}</div>`;
+}
+function modelCard(model, i){
+  const body = model.render
+    ? `<img loading="lazy" class="render" src="${model.render}" alt="">`
+    : materialStrip(model);
+  const label = model.mesh_name || model.object_name || "(unnamed)";
+  const tris = model.tris ? `${model.tris.toLocaleString()} tris · ` : "";
+  return `<div class="card" data-model="${i}">${body}
+    <b>${label}</b><s>${model.skinned ? "rigged · " : ""}${tris}${model.materials.length}
+    material${model.materials.length === 1 ? "" : "s"}</s></div>`;
+}
+function sceneCard(scene, i){
+  return `<div class="card" data-scene="${i}">
+    <img loading="lazy" class="render" src="${scene.render}" alt="">
+    <b>${scene.name}</b><s>${scene.parts} parts · ${scene.tris.toLocaleString()} tris</s></div>`;
+}
+function scenePanel(scene){
+  const parts = MODELS.filter(m => m.prefab_id === scene.id);
+  const strip = parts.map(m => `<figure>${m.render
+      ? `<img src="${m.render}">` : ""}<figcaption>${m.mesh_name
+      || m.object_name || "?"}</figcaption></figure>`).join("");
+  return `<button class="close"
+      onclick="document.getElementById('panel').classList.remove('open')">close</button>
+    <h2>${scene.name}</h2>
+    <img class="render" style="max-width:420px" src="${scene.render}">
+    <p style="color:var(--dim)">${scene.parts} parts, ${scene.tris.toLocaleString()}
+      triangles, assembled from the prefab's own transforms.</p>
+    <div class="partstrip">${strip}</div>`;
+}
+function modelPanel(model){
+  const rows = model.materials.map(material => {
+    const textures = material.textures.map(texture =>
+      `<figure><img src="${texture.img}" title="${texture.name}">
+       <figcaption>${texture.slot}<br>${texture.name}</figcaption></figure>`).join("");
+    return `<div class="matrow">${swatch(material.colour)}<b>${material.name}</b>
+      <small style="color:var(--dim)">${material.textures.length
+        ? material.textures.length + " texture" + (material.textures.length === 1 ? "" : "s")
+        : "flat colour, no texture"}</small></div>
+      ${textures ? `<div class="partstrip">${textures}</div>` : ""}`;
+  }).join("");
+  return `<button class="close"
+      onclick="stopClip();document.getElementById('panel').classList.remove('open')">close</button>
+    <h2>${model.mesh_name || model.object_name || "(unnamed)"}</h2>
+    ${model.render ? `<img class="render" style="max-width:340px"
+      src="${model.render}">` : ""}
+    <h3>mesh <span>${model.skinned ? "rigged geometry" : "static geometry"}${
+      model.mesh_bytes ? " · " + Math.round(model.mesh_bytes / 1024) + " KB" : ""}</span></h3>
+    <p style="color:var(--dim);font-size:13px;margin:4px 0">Geometry is not rendered
+      here. What is shown is the surface it is drawn with.</p>
+    <h3>materials <span>${model.materials.length}</span></h3>${rows}
+    <dl><dt>prefab</dt><dd>${model.prefab_name}</dd>
+        <dt>path</dt><dd>${model.path || "(root)"}</dd></dl>`;
+}
+
 // ---- obstacle view --------------------------------------------------------
 // The design enums name each blocker, so its art is exactly the tagged assets that
 // carry that name; grouping on it is what turns 800 loose sprites into ~40 obstacles.
@@ -632,6 +745,32 @@ function render(reset){
         `${FAMILIES.reduce((s, f) => s + f[1].length, 0)} parts`;
       return;
     }
+    if (VIEW === "models"){
+      const query = el("q").value.trim().toLowerCase();
+      // One row per placement is the right shape for the database and the wrong one
+      // for a gallery: a chair leg used four times is one mesh to look at.
+      const seen = new Set();
+      const shown = MODELS.map((m, i) => [m, i]).filter(([m]) => {
+        if (query && !((m.mesh_name || "").toLowerCase().includes(query) ||
+            (m.object_name || "").toLowerCase().includes(query) ||
+            (m.prefab_name || "").toLowerCase().includes(query))) return false;
+        const key = m.mesh_name || m.object_name;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const scenes = SCENES.filter(s => !query ||
+        s.name.toLowerCase().includes(query));
+      const assembled = scenes.length && !query
+        ? `<div class="scenehead">assembled prefabs</div>
+           <div class="scenestrip">${scenes.map(sceneCard).join("")}</div>
+           <div class="scenehead">individual meshes</div>` : "";
+      el("grid").innerHTML = assembled +
+        `<div class="scenestrip">${shown.map(([m, i]) => modelCard(m, i)).join("")}</div>`;
+      el("count").textContent = `${shown.length} models, ` +
+        `${shown.filter(([m]) => m.skinned).length} rigged, ${scenes.length} assembled`;
+      return;
+    }
     filtered = DATA.filter(match);
   }
   const slice = filtered.slice(shown, shown + 300);
@@ -639,7 +778,7 @@ function render(reset){
   shown += slice.length;
   el("count").textContent = `${filtered.length} assets` + (shown < filtered.length ? ` (showing ${shown})` : "");
 }
-["q","role","feature","mechanic","type","size","dups","imgs"].forEach(id =>
+["q","role","feature","mechanic","type","size","dups","imgs","atlas","eng"].forEach(id =>
   el(id).addEventListener(id === "q" ? "input" : "change", () => render(true)));
 addEventListener("scroll", () => {
   if (shown < filtered.length && innerHeight + scrollY > document.body.offsetHeight - 700) render(false);
@@ -649,6 +788,24 @@ document.querySelectorAll(".vtab").forEach(tab => tab.addEventListener("click", 
   VIEW = tab.dataset.view; render(true);
 }));
 el("grid").addEventListener("click", e => {
+  const scene = e.target.closest("[data-scene]");
+  if (scene){
+    stopClip();
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = scenePanel(SCENES[+scene.dataset.scene]);
+    panel.classList.add("open");
+    return;
+  }
+  const model = e.target.closest("[data-model]");
+  if (model){
+    stopClip();
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = modelPanel(MODELS[+model.dataset.model]);
+    panel.classList.add("open");
+    return;
+  }
   const group = e.target.closest("[data-fam]");
   if (group){
     stopClip();
@@ -678,6 +835,11 @@ el("grid").addEventListener("click", e => {
   panel.classList.add("open");
   if (d.kind === "animation" && d.layers) poseRig(d.layers, d.nodes, d.masks);
 });
+// The tab only exists when there is something behind it: a 2D build has no mesh
+// chain, and an empty view is worse than an absent one.
+if (!MODELS.length) el("modelstab").style.display = "none";
+if (PROFILE) el("profile").textContent =
+  `${PROFILE.verdict.toUpperCase()} build - ${PROFILE.note}`;
 render(true);
 </script></body></html>
 """
@@ -745,7 +907,7 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
     rows = conn.execute(
         """SELECT id, guid, name, rel_path, unity_type, ext, width, height, size_bytes,
                   image_path, duplicate_group, primary_role, primary_feature,
-                  primary_mechanic, duration_seconds, sample_rate, channels
+                  primary_mechanic, duration_seconds, sample_rate, channels, origin
              FROM assets ORDER BY unity_type, name"""
     ).fetchall()
 
@@ -811,6 +973,7 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
             "feature": row["primary_feature"], "mechanic": row["primary_mechanic"],
             "obstacle": row["id"] in obstacles, "sub": subcategory.get(row["id"]),
             "at": 1 if row["guid"] in atlas_pages else None,
+            "eng": 1 if row["origin"] == "engine" else None,
             "u": usage.get(row["id"], []),
             "dur": row["duration_seconds"], "rate": row["sample_rate"],
             "ch": row["channels"],
@@ -825,11 +988,60 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
         if made and made % 400 == 0:
             print(f"  {made} thumbnails", flush=True)
 
+    # The mesh chain, for builds that have one. Textures are addressed the same way
+    # sprites are, so a model's surface loads from the same folders as everything
+    # else on the page.
+    models: list[dict] = []
+    try:
+        for row in conn.execute(
+            """SELECT prefab_id, prefab_name, path, object_name, mesh_name,
+                      mesh_bytes, skinned, materials, render_path, tri_count
+                 FROM models ORDER BY skinned DESC, tri_count DESC, mesh_name"""):
+            entry = {
+                "prefab_id": row["prefab_id"],
+                "prefab_name": row["prefab_name"], "path": row["path"],
+                "object_name": row["object_name"], "mesh_name": row["mesh_name"],
+                "mesh_bytes": row["mesh_bytes"], "skinned": bool(row["skinned"]),
+                "render": row["render_path"], "tris": row["tri_count"],
+                "materials": json.loads(row["materials"]) if row["materials"] else [],
+            }
+            for material in entry["materials"]:
+                for texture in material.get("textures", []):
+                    path = texture.get("img")
+                    if path and not path.startswith("sprites/"):
+                        texture["img"] = (assets_root / path).as_uri()
+            models.append(entry)
+    except sqlite3.OperationalError:
+        pass                      # models stage not run for this catalogue
+
+    # An assembled prefab, drawn whole. This is the one view that shows the game
+    # rather than its parts, so it leads the 3D tab.
+    scenes: list[dict] = []
+    try:
+        for row in conn.execute(
+            """SELECT prefab_id, prefab_name, render_path, part_count, tri_count
+                 FROM scenes ORDER BY tri_count DESC"""):
+            scenes.append({"id": row["prefab_id"], "name": row["prefab_name"],
+                           "render": row["render_path"], "parts": row["part_count"],
+                           "tris": row["tri_count"]})
+    except sqlite3.OperationalError:
+        pass
+
+    stored = conn.execute(
+        "SELECT value FROM meta WHERE key = 'profile'").fetchone()
+    profile = json.loads(stored["value"]) if stored else None
+
     payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
-    page = PAGE.replace("__DATA__", payload).replace("__TITLE__", title)
+    page = (PAGE.replace("__DATA__", payload)
+                .replace("__MODELS__", json.dumps(models, ensure_ascii=False,
+                                                  separators=(",", ":")))
+                .replace("__SCENES__", json.dumps(scenes, ensure_ascii=False,
+                                                  separators=(",", ":")))
+                .replace("__PROFILE__", json.dumps(profile))
+                .replace("__TITLE__", title))
     (out_dir / "browser.html").write_text(page, encoding="utf-8")
     return {"assets": len(records), "thumbnails_created": made,
-            "with_thumb": sum(1 for r in records if r["t"])}
+            "with_thumb": sum(1 for r in records if r["t"]), "models": len(models)}
 
 
 def main() -> None:

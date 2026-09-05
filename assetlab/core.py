@@ -181,6 +181,37 @@ CREATE TABLE IF NOT EXISTS piece_groups (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_piece_asset ON piece_groups(asset_id);
 
+-- What a 3D build draws with. Stays empty for a 2D build, which is the point:
+-- the profile decides whether the stage that fills it runs at all.
+CREATE TABLE IF NOT EXISTS models (
+    id           INTEGER PRIMARY KEY,
+    prefab_id    INTEGER,
+    prefab_name  TEXT,
+    path         TEXT,      -- object path inside the prefab
+    object_name  TEXT,
+    mesh_guid    TEXT,
+    mesh_name    TEXT,
+    mesh_bytes   INTEGER,
+    skinned      INTEGER,   -- 1 for a SkinnedMeshRenderer, i.e. rigged geometry
+    materials    TEXT,      -- JSON: [{name, colour, textures:[{slot, name, img}]}]
+    matrix       TEXT,      -- JSON: 16 floats, the object's place inside its prefab
+    render_path  TEXT,      -- this one mesh, drawn on its own
+    tri_count    INTEGER,
+    vert_count   INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_models_prefab ON models(prefab_id);
+CREATE INDEX IF NOT EXISTS idx_models_mesh ON models(mesh_guid);
+
+-- A prefab drawn whole: every mesh it owns, each in its own place. A chair on its
+-- own is a shape; a chair under a table with a penguin on it is the game.
+CREATE TABLE IF NOT EXISTS scenes (
+    prefab_id   INTEGER PRIMARY KEY,
+    prefab_name TEXT,
+    render_path TEXT,
+    part_count  INTEGER,
+    tri_count   INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
 """
 
@@ -191,9 +222,23 @@ def connect(db_path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     # Additive migrations so an existing database keeps working across versions.
+    level_columns = {row[1] for row in conn.execute("PRAGMA table_info(levels)")}
+    if "object_layers" not in level_columns:
+        conn.execute("ALTER TABLE levels ADD COLUMN object_layers TEXT")
+
+    model_columns = {row[1] for row in conn.execute("PRAGMA table_info(models)")}
+    for column, decl in (("matrix", "TEXT"), ("render_path", "TEXT"),
+                         ("tri_count", "INTEGER"), ("vert_count", "INTEGER")):
+        if column not in model_columns:
+            conn.execute(f"ALTER TABLE models ADD COLUMN {column} {decl}")
+
     existing = {row[1] for row in conn.execute("PRAGMA table_info(assets)")}
     for column, decl in (("primary_role", "TEXT"), ("primary_feature", "TEXT"),
-                         ("primary_mechanic", "TEXT")):
+                         ("primary_mechanic", "TEXT"),
+                         # 'engine' for what Unity and its packages ship, 'game' for
+                         # what the studio authored. See classify.mark_origin.
+                         ("origin", "TEXT"),
+                         ("hold_count", "INTEGER")):
         if column not in existing:
             conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {decl}")
     # `levels` is purely derived, so an outdated shape is rebuilt rather than patched.
