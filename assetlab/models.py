@@ -311,6 +311,12 @@ class Renderer:
         return f"renders/{target.name}"
 
 
+#: Assembled prefabs are drawn larger than individual meshes; there are two orders
+#: of magnitude fewer of them, so the cost is small and the gain is where a reader
+#: spends their attention.
+SCENE_SIZE = 640
+
+
 def build(assets_root: Path, conn: sqlite3.Connection,
           out_dir: Path | None = None) -> dict[str, int]:
     by_guid = {row["guid"]: dict(row) for row in conn.execute(
@@ -418,7 +424,11 @@ def build(assets_root: Path, conn: sqlite3.Connection,
 
         # A single-mesh prefab is already covered by that mesh's own picture.
         if renderer and len(scene_pieces) > 1 and scene_triangles <= SCENE_TRIANGLE_CAP:
-            path = renderer.draw(scene_pieces, f"s{prefab['id']}", size=420)
+            # An assembled prefab is the picture a reader actually studies - it
+            # carries the whole object rather than one of its parts - so it gets
+            # the larger canvas. Single meshes stay small: there are thousands of
+            # them, and at 320 they already read as what they are.
+            path = renderer.draw(scene_pieces, f"s{prefab['id']}", size=SCENE_SIZE)
             if path:
                 scenes.append({"prefab_id": prefab["id"],
                                "prefab_name": prefab["name"], "render_path": path,

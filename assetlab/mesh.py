@@ -242,14 +242,22 @@ def parse_mesh(path: Path) -> Mesh | None:
     strides: dict[int, int] = {}
     starts: dict[int, int] = {}
     cursor = 0
-    for stream in sorted({c["stream"] for c in used}):
+    streams = sorted({c["stream"] for c in used})
+    for index, stream in enumerate(streams):
         items = [c for c in used if c["stream"] == stream]
         stride = max(c["offset"] + c["dimension"]
                      * FORMATS.get(c["format"], DEFAULT_FORMAT)[0]
                      for c in items)
         stride = (stride + 3) & ~3
         strides[stream], starts[stream] = stride, cursor
-        cursor += (count * stride + 15) & ~15
+        cursor += count * stride
+        if index + 1 < len(streams):
+            # The padding exists so the *next* stream starts on a 16-byte
+            # boundary. Nothing follows the last one, and m_DataSize ends exactly
+            # where its rows end - so padding it too makes every single-stream
+            # mesh whose rows are not a multiple of 16 fail the size check and be
+            # thrown away as unreadable.
+            cursor = (cursor + 15) & ~15
     declared = DATA_SIZE_RE.search(text)
     if cursor > len(data) or (declared and cursor != int(declared.group(1))
                               and int(declared.group(1)) > 0):
