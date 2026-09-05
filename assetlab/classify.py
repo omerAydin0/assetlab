@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections import Counter
 import sqlite3
 from collections import defaultdict, deque
 from pathlib import Path
@@ -105,6 +106,13 @@ def normalise_mechanic(name: str) -> str:
         if text.endswith(suffix) and len(text) > len(suffix):
             text = text[: -len(suffix)]
             break
+    # One mechanic is routinely named twice over: a build's per-cell flag is
+    # singular (`Curtain`) while the vector that places them is plural
+    # (`Curtains`), and an enum and a folder disagree the same way. Folding a
+    # trailing `s` merges those; `ss`, `us`, `is` and `as` are left alone so
+    # `glass`, `status` and `canvas` keep their last letter.
+    if len(text) > 4 and text.endswith("s") and not text.endswith(("ss", "us", "is", "as")):
+        text = text[:-1]
     return text
 
 
@@ -149,8 +157,16 @@ NON_BOARD_ENUM_RE = re.compile(
     r"currency|purchase|store|notification|analytic|log|error|state|anim|tween|"
     r"profile|inventory|sale|chat|team|player|row|daily|deal|warning|content|flow|"
     r"source|activation|atlas|mask|position|group|slot|fortune|modifier|special|"
-    r"generated|layer|fade|admin|debug|test",
+    r"generated|layer|fade|admin|debug|test|"
+    # `GoalUpdateType` is how a counter changes and `BlockUseType` is where a piece
+    # is being shown; both end in a board word and describe neither.
+    r"updatetype|usetype",
     re.I)
+
+#: A single trailing letter on an enum member marks an orientation or colour variant
+#: of one thing - `PAINT_BOTTLE_R/U/D/L`, `ROCKET_H/V`, `DEFAULT_R/P/Y/G/B`. Real
+#: suffixes in the same vocabularies are never that short (`SPIKE_SUB`, `COP_BIT`).
+VARIANT_SUFFIX_RE = re.compile(r"_[A-Za-z]$")
 # Geometry and bookkeeping members carry no design meaning, and a directional name
 # would otherwise swallow every `*_left` / `*_top` art file in the build.
 IGNORED_ENUM_MEMBERS = {"none", "count", "max", "min", "default", "unknown", "obsolete",
@@ -189,10 +205,15 @@ def scan_design_enums(assets_root: Path) -> dict[str, dict[str, str]]:
     scripts = assets_root / "Scripts"
     if not scripts.is_dir():
         return found
-    for path in scripts.rglob("*Type*.cs"):
+    # Every source file, because the enum's own name is what selects it and a build
+    # is free to declare `ItemType` inside `Board.cs`. The substring test costs
+    # nothing next to the read and skips the great majority.
+    for path in scripts.rglob("*.cs"):
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
+            continue
+        if "enum " not in text:
             continue
         for name, body in ENUM_RE.findall(text):
             if BOOSTER_ENUM_RE.search(name):
@@ -202,9 +223,122 @@ def scan_design_enums(assets_root: Path) -> dict[str, dict[str, str]]:
             else:
                 continue
             for member in ENUM_MEMBER_RE.findall(body):
-                key = normalise_mechanic(member)
-                if key and member.lower() not in IGNORED_ENUM_MEMBERS and len(key) > 2:
-                    found[bucket].setdefault(key, member)
+                stem = VARIANT_SUFFIX_RE.sub("", member) if len(member) > 3 else member
+                key = normalise_mechanic(stem)
+                if (key and stem.lower() not in IGNORED_ENUM_MEMBERS
+                        and member.lower() not in IGNORED_ENUM_MEMBERS
+                        and len(key) > 2):
+                    found[bucket].setdefault(key, stem)
+    return found
+
+
+# Not every build writes its design vocabulary into enums. One measured here has no
+# `ItemType` at all - its nineteen `*Type*.cs` files are Adapty, haptics and
+# notifications - and states its mechanics as folders and classes instead:
+#
+#     Scenes/Game/Mechanics/FrozenGroup/     LockAndKey/     MysteryGroup/
+#     Scenes/Game/Mechanics/Booster/ChairBoosterStrategy.cs, KickBoosterStrategy.cs
+#
+# So the code tree is read as a second source. It is consulted after the enums and
+# only adds names they did not already carry, because an enum is a declaration and
+# a folder name is an inference.
+MECHANIC_CONTAINER_RE = re.compile(
+    r"(?:^|/)(Mechanics|Items|Blocks|Blockers|Obstacles|Boosters?|Powerups|"
+    r"GameItems|BoardItems)$", re.I)
+MECHANIC_CLASS_RE = re.compile(
+    r"(Strategy|Group|Item|Blocker|Obstacle|Booster|Mechanic|View)$")
+INTERFACE_RE = re.compile(r"^I[A-Z]")
+
+# Plumbing that lives beside the mechanics without being one.
+CODE_VOCABULARY_SKIP = {
+    "config", "configs", "base", "common", "shared", "util", "utils", "utilities",
+    "view", "views", "data", "intro", "intros", "factory", "manager", "controller",
+    "state", "states", "board", "boosterinfo", "interfaces", "features",
+    "animations", "property", "properties", "conditions", "groupconditions",
+    "resources", "customitemresources", "checkpoint", "info", "selection",
+    "handler", "helpers", "extensions", "blockmanager", "possiblematch", "match",
+    "layout", "layouts", "queue", "boosters", "boosterselection",
+}
+
+
+def scan_code_mechanics(assets_root: Path) -> dict[str, dict[str, str]]:
+    """Return {'Booster': {...}, 'Obstacle': {...}} read from the gameplay code tree."""
+    found: dict[str, dict[str, str]] = {"Booster": {}, "Obstacle": {}}
+    scripts = assets_root / "Scripts"
+    if not scripts.is_dir():
+        return found
+
+    def offer(name: str) -> None:
+        key = normalise_mechanic(name)
+        if not key or len(key) < 3 or key in CODE_VOCABULARY_SKIP:
+            return
+        bucket = "Booster" if "booster" in key else "Obstacle"
+        if key == "booster":
+            return                      # the container, not a booster
+        found[bucket].setdefault(key, name)
+
+    for directory in scripts.rglob("*"):
+        if not directory.is_dir():
+            continue
+        parent = str(directory.parent.relative_to(scripts)).replace("\\", "/")
+        if MECHANIC_CONTAINER_RE.search(parent):
+            offer(directory.name)
+
+    for source in scripts.rglob("*.cs"):
+        if INTERFACE_RE.match(source.stem):
+            continue
+        relative = str(source.parent.relative_to(scripts)).replace("\\", "/")
+        if not (MECHANIC_CONTAINER_RE.search(relative)
+                or MECHANIC_CONTAINER_RE.search(relative.rsplit("/", 1)[0])):
+            continue
+        match = MECHANIC_CLASS_RE.search(source.stem)
+        if match and match.start() > 2:
+            offer(source.stem[:match.start()])
+    return found
+
+
+# Layer names a Tiled board always has, whatever the game puts on them.
+STRUCTURAL_LAYER_RE = re.compile(
+    r"^(tile ?layer|layer|set|grid|board|base|background|bg|item|items|spawner|"
+    r"spawn|objectives?|nonobjectives?|goal|goals|shelf|shelves|tutorial|"
+    r"blueprint|drop ?zone|portal ?in|portal ?out)\s*\d*$", re.I)
+
+
+def scan_level_vocabulary(conn: sqlite3.Connection) -> dict[str, str]:
+    """Obstacle names the level files declare, as {normalised: display}.
+
+    A designer who names a layer `BrickWall2` has declared an obstacle as plainly as
+    an enum entry would. The trailing index is a placement counter - `BrickWall1` and
+    `BrickWall2` are two walls in one level, not two kinds of wall - so it is folded
+    away, and the structural layers every Tiled board carries are dropped.
+    """
+    found: dict[str, str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT obstacle_layers, object_layers FROM levels").fetchall()
+    except sqlite3.OperationalError:
+        return found
+
+    seen: Counter[str] = Counter()
+    display: dict[str, str] = {}
+    for row in rows:
+        for column in ("obstacle_layers", "object_layers"):
+            for name in (row[column] or "").split(","):
+                name = name.strip()
+                if not name or STRUCTURAL_LAYER_RE.match(name):
+                    continue
+                stem = re.sub(r"[\s_-]*\d+$", "", name).strip()
+                key = normalise_mechanic(stem)
+                if len(key) < 3:
+                    continue
+                seen[key] += 1
+                display.setdefault(key, stem)
+
+    # One level naming a layer oddly is a typo; a name used across levels is a
+    # mechanic. Two is enough to separate them without losing a rare obstacle.
+    for key, count in seen.items():
+        if count >= 2:
+            found[key] = display[key]
     return found
 
 
@@ -464,6 +598,69 @@ def mechanics_from_holders(usage: list[dict],
     return {asset_id: next(iter(words))
             for asset_id, words in votes.items() if len(words) == 1}
 
+# Unity and its render pipeline packages ship art of their own, and an export cannot
+# tell it apart from the studio's by folder - it all lands in Texture2D/ and Sprite/
+# together. In the build measured here that is 33 dither tiles, a Bayer matrix and
+# the Rendering Debugger's checkbox set: 45 of 405 previewable assets, all of them
+# blank or near-blank grey squares, and all of them at the front of the grid because
+# they sort small. Removing them is not tidying. It is the difference between a
+# catalogue of a game and a catalogue of a game plus its engine.
+#
+# Two signals decide it, in order of strength:
+#
+#   1. **Who holds it.** The reference graph already knows that `UICheckMark` appears
+#      only in `DebugUI*` prefabs and that `seperator` appears in `ShopDialog`. An
+#      asset held exclusively by engine prefabs is engine art, whatever it is called.
+#   2. **What it is called**, for the ones nothing holds at all - a dither tile is
+#      bound by a shader, and a shader binds by property name, not by a guid the
+#      graph can see.
+#: Families the engine numbers, matched on the prefix - `LDR_LLL1_0` through
+#: `LDR_LLL1_32` are one lookup table, not 33 assets worth listing separately.
+ENGINE_PREFIX_RE = re.compile(
+    r"^(LDR_LLL|BlueNoise|NoiseTex|OwenScrambled|ScrambleNoise|Default-|DebugUI|"
+    r"FrameSettings|unity_builtin|UIFoldout|UISprite)", re.I)
+
+#: Whole names, where a prefix test would catch the studio's own work: a game may
+#: legitimately ship a sprite called `Background`, but not one called exactly `1x1`.
+ENGINE_NAME_RE = re.compile(
+    r"^(BayerMatrix|UIElement\d+px|UICheckMark|White1px|1x1|InputFieldBackground|"
+    r"UIMask|DropdownArrow|Knob|Checkmark)$", re.I)
+
+#: Prefabs that belong to a package rather than to the game.
+ENGINE_HOLDER_RE = re.compile(r"^(DebugUI|SceneView|EditorOnly|Unity)", re.I)
+
+
+def mark_origin(conn: sqlite3.Connection) -> dict[str, int]:
+    """Label every asset 'game' or 'engine', and record how many things hold it."""
+    holders: dict[int, list[str]] = {}
+    for row in conn.execute("SELECT asset_id, holder_name FROM used_by"):
+        holders.setdefault(row["asset_id"], []).append(row["holder_name"] or "")
+
+    updates, counts = [], {"game": 0, "engine": 0, "unheld": 0}
+    for row in conn.execute("SELECT id, name FROM assets"):
+        held = holders.get(row["id"], [])
+        name = row["name"] or ""
+
+        if held:
+            # Held only by engine prefabs, and by at least one of them.
+            engine = all(ENGINE_HOLDER_RE.match(h) for h in held)
+        else:
+            engine = False
+            counts["unheld"] += 1
+        if not engine and (ENGINE_NAME_RE.match(name)
+                           or ENGINE_PREFIX_RE.match(name)):
+            engine = True
+
+        origin = "engine" if engine else "game"
+        counts[origin] += 1
+        updates.append((origin, len(held), row["id"]))
+
+    conn.executemany("UPDATE assets SET origin = ?, hold_count = ? WHERE id = ?",
+                     updates)
+    conn.commit()
+    return counts
+
+
 def classify(assets_root: Path, primary_content: Path | None,
              conn: sqlite3.Connection, rules_path: Path | None = None) -> dict[str, int]:
     bundle_map = load_bundle_map(primary_content)
@@ -472,6 +669,19 @@ def classify(assets_root: Path, primary_content: Path | None,
     enums = scan_design_enums(assets_root)
     families.update(enums["Obstacle"])
     boosters = dict(enums["Booster"])
+
+    # Third source, for a build that ships neither enums nor code: the level files.
+    from_levels = scan_level_vocabulary(conn)
+    for key, name in from_levels.items():
+        families.setdefault(key, name)
+
+    # Second source, for builds whose vocabulary is in the code rather than an enum.
+    from_code = scan_code_mechanics(assets_root)
+    for key, display in from_code["Booster"].items():
+        boosters.setdefault(key, display)
+    for key, display in from_code["Obstacle"].items():
+        if key not in boosters:
+            families.setdefault(key, display)
     for extra in (rules.get("extra_obstacles") or []):
         families.setdefault(normalise_mechanic(extra), extra)
     for extra in (rules.get("extra_boosters") or []):
@@ -479,6 +689,12 @@ def classify(assets_root: Path, primary_content: Path | None,
     if enums["Booster"] or enums["Obstacle"]:
         print(f"  design enums: {len(enums['Booster'])} boosters, "
               f"{len(enums['Obstacle'])} obstacles")
+    if from_levels:
+        print(f"  level layers: {len(from_levels)} obstacles "
+              f"({', '.join(sorted(from_levels.values())[:8])})")
+    if from_code["Booster"] or from_code["Obstacle"]:
+        print(f"  gameplay code: {len(from_code['Booster'])} boosters, "
+              f"{len(from_code['Obstacle'])} obstacles")
     holder_roles = scan_prefab_roles(assets_root, conn)
     inherited, usage = propagate(conn, holder_roles)
     vocabulary = {**families, **boosters}
@@ -666,8 +882,12 @@ def classify(assets_root: Path, primary_content: Path | None,
         """INSERT OR IGNORE INTO used_by (asset_id, holder_guid, holder_name, holder_type)
            VALUES (:asset_id, :holder_guid, :holder_name, :holder_type)""", usage)
     conn.commit()
+
+    # Needs the finished used_by table: an asset's origin is decided by who holds it.
+    origin = mark_origin(conn)
     return {"tags": len(tags), "usage_links": len(usage), "resolved": resolved,
-            "total": len(assets), "prefabs_scanned": len(holder_roles)}
+            "total": len(assets), "prefabs_scanned": len(holder_roles),
+            "engine": origin["engine"], "game": origin["game"]}
 
 
 def main() -> None:
@@ -687,6 +907,7 @@ def main() -> None:
     stats = classify(args.export.resolve(),
                      args.primary_content.resolve() if args.primary_content else None,
                      conn, rules_path)
+    print(f"origin     game={stats['game']}  engine={stats['engine']}")
     unresolved = stats["total"] - stats["resolved"]
     print(f"tags={stats['tags']}  usage_links={stats['usage_links']}  "
           f"prefabs_scanned={stats['prefabs_scanned']}")
