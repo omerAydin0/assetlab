@@ -38,6 +38,30 @@ label.chk{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:13p
 label.game{display:flex;align-items:center;gap:6px;background:#232833;border:1px solid var(--line);
  border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer}
 #count{color:var(--dim);font-size:13px;margin-left:auto}
+#filtertoggle{display:none}
+@media (max-width:760px){
+  header{padding:10px 12px;max-height:80vh;overflow-y:auto}
+  h1{display:flex;align-items:center;justify-content:space-between;gap:10px;
+     margin-bottom:8px;font-size:15px}
+  #filtertoggle{display:inline-block;flex:none;background:#232833;color:var(--text);
+    border:1px solid var(--line);border-radius:6px;padding:6px 12px;font:inherit;
+    cursor:pointer}
+  /* Collapsed by default: the tabs and the count are the only things worth a
+     permanent row, and everything else is one tap away. */
+  header:not(.open) .games{display:none}
+  header:not(.open) .controls>:not(.vtabs):not(#count){display:none}
+  .controls{gap:6px}
+  .vtabs{display:flex;width:100%}
+  .vtabs .vtab{flex:1;text-align:center}
+  #count{margin-left:0;width:100%}
+  .games{gap:6px}
+  label.game{font-size:12px;padding:4px 8px;gap:5px}
+  input[type=search]{min-width:0;width:100%}
+  /* Two per row rather than one, which is what made the panel four screens tall. */
+  .controls select{flex:1 1 45%;min-width:0}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+  main{padding:12px 12px 60px}
+}
 main{padding:14px 16px 60px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px;cursor:pointer;overflow:hidden}
@@ -71,6 +95,27 @@ button.close{background:none;border:1px solid var(--line);color:var(--dim);borde
 .vtab.on{background:var(--accent);color:#0d1117;border-color:var(--accent)}
 aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);
  margin:16px 0 6px;font-weight:600}
+/* A model has no picture of itself; the surface it is drawn with stands in. */
+.swatch{display:inline-block;width:26px;height:26px;border-radius:5px;
+ border:1px solid var(--line);vertical-align:middle;margin-right:8px}
+.matrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;
+ border-bottom:1px solid var(--line)}
+.matrow:last-child{border-bottom:0}
+.matrow b{font-weight:500;font-size:12px}
+.render{width:100%;aspect-ratio:1;background:#0e1014;border-radius:5px;
+  object-fit:contain;display:block}
+.scenestrip{grid-column:1/-1;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin:0 0 22px}
+.scenehead{grid-column:1/-1;font:600 13px/1.5 inherit;color:var(--dim);
+  letter-spacing:.04em;text-transform:uppercase;margin:0 0 10px}
+.modelshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ align-items:center;justify-content:center;gap:4px;padding:5px;overflow:hidden}
+.modelshots img{width:auto;height:auto;max-width:46%;max-height:100%;
+ object-fit:contain;background:none;border-radius:0}
+.modelshots .flat{width:44px;height:44px;border-radius:8px;border:1px solid var(--line)}
+.pbadge{font-size:10px;padding:0 5px;border-radius:3px;margin-left:5px;
+ background:#252b34;color:var(--dim);letter-spacing:.4px}
+.pbadge.is3d{background:var(--accent);color:#0d1117}
 aside h3 span{text-transform:none;letter-spacing:0;color:var(--dim);font-weight:400;
  margin-left:8px;font-size:12px}
 /* An obstacle card shows several of its parts, so a set is recognisable as a set
@@ -93,11 +138,13 @@ aside.wide{width:min(900px,96vw)}
 .partstrip figcaption{color:var(--dim);font-size:10px;margin-top:3px;word-break:break-all}
 </style></head><body>
 <header>
-  <h1>AssetLab <span style="color:var(--dim);font-weight:400">— all games</span></h1>
+  <h1><span>AssetLab <span style="color:var(--dim);font-weight:400">— all games</span></span>
+    <button id="filtertoggle" aria-expanded="false">filters</button></h1>
   <div class="games" id="games"></div>
   <div class="controls">
-    <span><button class="vtab on" data-view="assets">assets</button><button
-      class="vtab" data-view="obstacles">obstacles</button></span>
+    <span class="vtabs"><button class="vtab on" data-view="assets">assets</button><button
+      class="vtab" data-view="obstacles">obstacles</button><button
+      class="vtab" data-view="models" id="modelstab">models</button></span>
     <input type="search" id="q" placeholder="search name / path…">
     <select id="role"></select><select id="feature"></select>
     <select id="mechanic"></select><select id="type"></select>
@@ -107,6 +154,7 @@ aside.wide{width:min(900px,96vw)}
       <option value="512-99999">512 px +</option>
     </select>
     <label class="chk"><input type="checkbox" id="obst"> obstacles only</label>
+    <label class="chk"><input type="checkbox" id="atlas" checked> hide atlas sheets</label>
     <span id="count"></span>
   </div>
 </header>
@@ -118,9 +166,15 @@ const F = ["role","feature","mechanic","type"];
 const el = id => document.getElementById(id);
 DATA.forEach((d, i) => { d._i = i; });
 
-el("games").innerHTML = GAMES.map(g =>
-  `<label class="game"><input type="checkbox" class="gamebox" value="${g.id}" checked>
-   ${g.title} <span style="color:var(--dim)">${g.count.toLocaleString()}</span></label>`).join("");
+// Each build carries the verdict of its own profile stage, so a thin-looking
+// catalogue can be read as "this one is 3D" rather than as a broken import.
+el("games").innerHTML = GAMES.map(g => {
+  const p = g.profile;
+  const badge = p ? `<span class="pbadge ${p.verdict === "3d" ? "is3d" : ""}"
+    title="${p.note} (score ${p.score})">${p.verdict.toUpperCase()}</span>` : "";
+  return `<label class="game"><input type="checkbox" class="gamebox" value="${g.id}" checked>
+   ${g.title} <span style="color:var(--dim)">${g.count.toLocaleString()}</span>${badge}</label>`;
+}).join("");
 
 function activeGames(){
   return new Set([...document.querySelectorAll(".gamebox")].filter(b => b.checked)
@@ -130,6 +184,8 @@ let games = activeGames();
 
 function passes(d, skipKey){
   if (!games.has(d.g)) return false;
+  // An atlas sheet is the page its sprites were cut from, not a piece of art.
+  if (el("atlas").checked && d.at) return false;
   if (el("obst").checked && !d.obstacle) return false;
   for (const k of F) { if (k === skipKey) continue;
                        const v = el(k).value; if (v && d[k] !== v) return false; }
@@ -481,6 +537,84 @@ function card(d, i){
 const GAMEBADGE = Object.fromEntries(GAMES.map(g => [g.id, g.short]));
 
 
+// ---- model view -----------------------------------------------------------
+// What a 3D build has instead of sprites: a mesh drawn through materials, each of
+// which is either a set of textures or a flat colour. Both are shown, because in
+// the 3D build here half the models are colour and no texture at all.
+const MODELS = __MODELS__;
+const SCENES = __SCENES__;
+
+function swatch(colour){
+  return colour ? `<span class="swatch" style="background:${colour.hex}"
+    title="${colour.hex}"></span>` : "";
+}
+// A drawn model beats the atlas it is painted with: a UV sheet is a scattering of
+// unplaced parts, and no reader has ever recognised a character from one.
+function materialStrip(model){
+  const shots = [];
+  for (const material of model.materials){
+    for (const texture of material.textures.slice(0, 2))
+      shots.push(`<img loading="lazy" src="${texture.img}" title="${texture.name}">`);
+    if (!material.textures.length && material.colour)
+      shots.push(`<div class="flat" style="background:${material.colour.hex}"></div>`);
+  }
+  return `<div class="modelshots">${shots.slice(0, 4).join("") ||
+    `<span style="color:#5c6675">no material</span>`}</div>`;
+}
+function modelCard(model, i){
+  const body = model.render
+    ? `<img loading="lazy" class="render" src="${model.render}" alt="">`
+    : materialStrip(model);
+  const label = model.mesh_name || model.object_name || "(unnamed)";
+  const tris = model.tris ? `${model.tris.toLocaleString()} tris · ` : "";
+  return `<div class="card" data-model="${i}">${body}
+    <b>${label}</b><s>${GAMEBADGE[model.g]} · ${model.skinned ? "rigged · " : ""}${tris}${
+      model.materials.length} material${model.materials.length === 1 ? "" : "s"}</s></div>`;
+}
+function sceneCard(scene, i){
+  return `<div class="card" data-scene="${i}">
+    <img loading="lazy" class="render" src="${scene.render}" alt="">
+    <b>${scene.name}</b><s>${GAMEBADGE[scene.g]} · ${scene.parts} parts ·
+    ${scene.tris.toLocaleString()} tris</s></div>`;
+}
+function scenePanel(scene){
+  const parts = MODELS.filter(m => m.g === scene.g && m.prefab_id === scene.id);
+  const strip = parts.map(m => `<figure>${m.render ? `<img src="${m.render}">` : ""}
+    <figcaption>${m.mesh_name || m.object_name || "?"}</figcaption></figure>`).join("");
+  return `<button class="close"
+      onclick="document.getElementById('panel').classList.remove('open')">close</button>
+    <h2>${scene.name}</h2>
+    <img class="render" style="max-width:420px" src="${scene.render}">
+    <p style="color:var(--dim)">${scene.parts} parts, ${scene.tris.toLocaleString()}
+      triangles, assembled from the prefab's own transforms.</p>
+    <div class="partstrip">${strip}</div>`;
+}
+function modelPanel(model){
+  const rows = model.materials.map(material => {
+    const textures = material.textures.map(texture =>
+      `<figure><img src="${texture.img}" title="${texture.name}">
+       <figcaption>${texture.slot}<br>${texture.name}</figcaption></figure>`).join("");
+    return `<div class="matrow">${swatch(material.colour)}<b>${material.name}</b>
+      <small style="color:var(--dim)">${material.textures.length
+        ? material.textures.length + " texture" + (material.textures.length === 1 ? "" : "s")
+        : "flat colour, no texture"}</small></div>
+      ${textures ? `<div class="partstrip">${textures}</div>` : ""}`;
+  }).join("");
+  return `<button class="close"
+      onclick="stopClip();document.getElementById('panel').classList.remove('open')">close</button>
+    <h2>${model.mesh_name || model.object_name || "(unnamed)"}</h2>
+    ${model.render ? `<img class="render" style="max-width:340px"
+      src="${model.render}">` : ""}
+    <div><span class="tag">${GAMEBADGE[model.g]}</span></div>
+    <h3>mesh <span>${model.skinned ? "rigged geometry" : "static geometry"}${
+      model.mesh_bytes ? " · " + Math.round(model.mesh_bytes / 1024) + " KB" : ""}</span></h3>
+    <p style="color:var(--dim);font-size:13px;margin:4px 0">Geometry is not rendered
+      here. What is shown is the surface it is drawn with.</p>
+    <h3>materials <span>${model.materials.length}</span></h3>${rows}
+    <dl><dt>prefab</dt><dd>${model.prefab_name}</dd>
+        <dt>path</dt><dd>${model.path || "(root)"}</dd></dl>`;
+}
+
 // ---- obstacle view --------------------------------------------------------
 // The design enums name each blocker, so its art is exactly the tagged assets that
 // carry that name; grouping on it is what turns 800 loose sprites into ~40 obstacles.
@@ -615,6 +749,34 @@ function render(reset){
         `${FAMILIES.reduce((s, f) => s + f[1].length, 0)} parts`;
       return;
     }
+    if (VIEW === "models"){
+      const query = el("q").value.trim().toLowerCase();
+      const shown = MODELS.map((m, i) => [m, i]).filter(([m]) => games.has(m.g) &&
+        (!query || (m.mesh_name || "").toLowerCase().includes(query) ||
+                   (m.object_name || "").toLowerCase().includes(query) ||
+                   (m.prefab_name || "").toLowerCase().includes(query)));
+      // One row per placement suits the database; a gallery wants one card per
+      // distinct mesh, or a chair leg used four times fills the screen.
+      const seen = new Set();
+      const unique = shown.filter(([m]) => {
+        const key = m.g + "/" + (m.mesh_name || m.object_name);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const assembled = SCENES.map((s, i) => [s, i]).filter(([s]) => games.has(s.g) &&
+        (!query || s.name.toLowerCase().includes(query)));
+      const lead = assembled.length
+        ? `<div class="scenehead">assembled prefabs</div>
+           <div class="scenestrip">${assembled.map(([s, i]) => sceneCard(s, i)).join("")}</div>
+           <div class="scenehead">individual meshes</div>` : "";
+      el("grid").innerHTML = lead +
+        `<div class="scenestrip">${unique.map(([m, i]) => modelCard(m, i)).join("")}</div>`;
+      el("count").textContent = `${unique.length} models, ` +
+        `${unique.filter(([m]) => m.skinned).length} rigged, ` +
+        `${assembled.length} assembled`;
+      return;
+    }
     filtered = DATA.filter(match);
   }
   const slice = filtered.slice(shown, shown+300);
@@ -623,10 +785,11 @@ function render(reset){
   el("count").textContent = `${filtered.length.toLocaleString()} assets` +
     (shown < filtered.length ? ` (showing ${shown})` : "");
 }
-["q","role","feature","mechanic","type","size","obst"].forEach(id =>
+["q","role","feature","mechanic","type","size","obst","atlas"].forEach(id =>
   el(id).addEventListener(id === "q" ? "input" : "change", () => render(true)));
 document.querySelectorAll(".gamebox").forEach(box =>
-  box.addEventListener("change", () => { games = activeGames(); render(true); }));
+  box.addEventListener("change", () => {
+    games = activeGames(); syncModelsTab(); render(true); }));
 addEventListener("scroll", () => {
   if (shown < filtered.length && innerHeight + scrollY > document.body.offsetHeight - 700)
     render(false);
@@ -635,7 +798,30 @@ document.querySelectorAll(".vtab").forEach(tab => tab.addEventListener("click", 
   document.querySelectorAll(".vtab").forEach(b => b.classList.toggle("on", b === tab));
   VIEW = tab.dataset.view; render(true);
 }));
+el("filtertoggle").addEventListener("click", event => {
+  const open = document.querySelector("header").classList.toggle("open");
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+  event.currentTarget.textContent = open ? "close" : "filters";
+});
+
 el("grid").addEventListener("click", e => {
+  const scene = e.target.closest("[data-scene]");
+  if (scene){
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = scenePanel(SCENES[+scene.dataset.scene]);
+    panel.classList.add("open");
+    return;
+  }
+  const model = e.target.closest("[data-model]");
+  if (model){
+    stopClip();
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = modelPanel(MODELS[+model.dataset.model]);
+    panel.classList.add("open");
+    return;
+  }
   const group = e.target.closest("[data-fam]");
   if (group){
     stopClip();
@@ -661,6 +847,17 @@ el("grid").addEventListener("click", e => {
   if (d.kind === "animation" && d.layers) poseRig(d.layers, d.nodes, d.masks);
   panel.classList.add("open");
 });
+// The tab exists only when a selected build has a mesh chain behind it.
+function syncModelsTab(){
+  const any = MODELS.some(m => games.has(m.g)) || SCENES.some(s => games.has(s.g));
+  el("modelstab").style.display = any ? "" : "none";
+  if (!any && VIEW === "models"){
+    VIEW = "assets";
+    document.querySelectorAll(".vtab").forEach(b =>
+      b.classList.toggle("on", b.dataset.view === "assets"));
+  }
+}
+syncModelsTab();
 render(true);
 </script></body></html>
 """
@@ -760,28 +957,91 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
             record["masks"] = clip["masks"]
             record["clipdur"] = clip["dur"]
         records.append(record)
+    # The mesh chain, for a build that has one. Texture paths get the same game
+    # prefix as sprites, so a model's surface loads from that build's folder.
+    models: list[dict] = []
+    try:
+        for row in conn.execute(
+            """SELECT prefab_id, prefab_name, path, object_name, mesh_name,
+                      mesh_bytes, skinned, materials, render_path, tri_count
+                 FROM models ORDER BY skinned DESC, tri_count DESC, mesh_name"""):
+            entry = {
+                "g": name, "prefab_id": row["prefab_id"],
+                "prefab_name": row["prefab_name"], "path": row["path"],
+                "object_name": row["object_name"], "mesh_name": row["mesh_name"],
+                "mesh_bytes": row["mesh_bytes"], "skinned": bool(row["skinned"]),
+                "render": prefix + row["render_path"] if row["render_path"] else None,
+                "tris": row["tri_count"],
+                "materials": json.loads(row["materials"]) if row["materials"] else [],
+            }
+            for material in entry["materials"]:
+                kept = []
+                for texture in material.get("textures", []):
+                    image = texture.get("img") or ""
+                    if image.startswith("sprites/"):
+                        texture["img"] = prefix + image
+                    else:
+                        # A loose texture lives in the export tree, which the hub
+                        # cannot reach. Its thumbnail is already next to the page,
+                        # so the surface is shown at reduced size rather than lost.
+                        thumb = out_dir / name / "thumbs" / f"{texture.get('id')}.jpg"
+                        if not thumb.is_file():
+                            continue
+                        texture["img"] = f"{prefix}thumbs/{texture['id']}.jpg"
+                        texture["reduced"] = True
+                    kept.append(texture)
+                material["textures"] = kept
+            models.append(entry)
+    except sqlite3.OperationalError:
+        pass                       # models stage not run for this catalogue
+
+    scenes: list[dict] = []
+    try:
+        for row in conn.execute(
+            """SELECT prefab_id, prefab_name, render_path, part_count, tri_count
+                 FROM scenes ORDER BY tri_count DESC"""):
+            scenes.append({"g": name, "id": row["prefab_id"],
+                           "name": row["prefab_name"],
+                           "render": prefix + row["render_path"],
+                           "parts": row["part_count"], "tris": row["tri_count"]})
+    except sqlite3.OperationalError:
+        pass
+
+    stored = conn.execute("SELECT value FROM meta WHERE key = 'profile'").fetchone()
+    profile = json.loads(stored["value"]) if stored else None
+
     conn.close()
-    return records, {"id": name, "title": name, "short": name, "count": len(records)}
+    return records, {"id": name, "title": name, "short": name,
+                     "count": len(records), "profile": profile}, models, scenes
 
 
 def build(out_dir: Path, names: list[str]) -> dict:
-    data, games = [], []
+    data, games, models, scenes = [], [], [], []
     for name in names:
         result = collect(out_dir, name)
         if result is None:
             print(f"  skipped {name}: no catalogue")
             continue
-        records, meta = result
+        records, meta, found, assembled = result
         data.extend(records)
         games.append(meta)
-        print(f"  {name:<14} {len(records):>7} previewable assets")
+        models.extend(found)
+        scenes.extend(assembled)
+        verdict = (meta.get("profile") or {}).get("verdict", "?").upper()
+        extra = f", {len(found)} models" if found else ""
+        print(f"  {name:<14} {len(records):>7} previewable assets  [{verdict}]{extra}")
 
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     page = (PAGE.replace("__DATA__", payload)
+                .replace("__MODELS__", json.dumps(models, ensure_ascii=False,
+                                                  separators=(",", ":")))
+                .replace("__SCENES__", json.dumps(scenes, ensure_ascii=False,
+                                                  separators=(",", ":")))
                 .replace("__GAMES__", json.dumps(games, ensure_ascii=False)))
     target = out_dir / "hub.html"
     target.write_text(page, encoding="utf-8")
-    return {"games": len(games), "assets": len(data), "bytes": len(page), "path": target}
+    return {"games": len(games), "assets": len(data), "models": len(models),
+            "bytes": len(page), "path": target}
 
 
 def main() -> None:

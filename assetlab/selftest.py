@@ -14,7 +14,11 @@ from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
 from .classify import (feature_from_project_dir, feature_from_container_path,
                        match_vocabulary, mechanics_from_holders)
 from .core import infer_type
-from .levels import looks_like_tiled, parse_level
+from .models import parse_material, parse_prefab_models
+from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
+from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
+                     diagnose_staging)
+from .levels import corpus_candidates, looks_like_tiled, parse_level
 from .slice_sprites import (ROTATION_90, anchor, packing_rotation, parse_sprite,
                             unrotate)
 
@@ -158,9 +162,281 @@ SpriteRenderer:
   m_SortingOrder: 0
 """
 
+
+# A material on a lit shader that binds no texture at all. Half the models in the
+# 3D build measured here look exactly like this: the surface is a colour.
+FLAT_MATERIAL = """%YAML 1.1
+--- !u!21 &2100000
+Material:
+  m_Name: ChairSecondary
+  m_Shader: {fileID: 4800000, guid: 98c84dc6b2bdef1449b918ccce5c135e, type: 3}
+  m_SavedProperties:
+    m_TexEnvs:
+      _BaseMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+      _BumpMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+    m_Colors:
+      _BaseColor: {r: 0.10087212, g: 0.13451827, b: 0.3164476, a: 1}
+      _EmissionColor: {r: 0, g: 0, b: 0, a: 0}
+"""
+
+TEXTURED_MATERIAL = """%YAML 1.1
+--- !u!21 &2100000
+Material:
+  m_Name: FlowerBlue
+  m_Shader: {fileID: 4800000, guid: 98c84dc6b2bdef1449b918ccce5c135e, type: 3}
+  m_SavedProperties:
+    m_TexEnvs:
+      _BaseMap:
+        m_Texture: {fileID: 2800000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+        m_Scale: {x: 1, y: 1}
+      _BumpMap:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+    m_Colors:
+      _BaseColor: {r: 1, g: 1, b: 1, a: 1}
+"""
+
+MODEL_PREFAB = """%YAML 1.1
+--- !u!1 &100
+GameObject:
+  m_Name: Root
+--- !u!4 &400
+Transform:
+  m_GameObject: {fileID: 100}
+  m_Children:
+  - {fileID: 401}
+  m_Father: {fileID: 0}
+--- !u!1 &101
+GameObject:
+  m_Name: Chair
+--- !u!4 &401
+Transform:
+  m_GameObject: {fileID: 101}
+  m_Children: []
+  m_Father: {fileID: 400}
+--- !u!33 &3300
+MeshFilter:
+  m_GameObject: {fileID: 101}
+  m_Mesh: {fileID: 4300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+--- !u!23 &2300
+MeshRenderer:
+  m_GameObject: {fileID: 101}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+  - {fileID: 2100000, guid: dddddddddddddddddddddddddddddddd, type: 2}
+"""
+
 TILED_JSON = ('{ "compressionlevel":-1,\n "height":12,\n "layers":[\n  {"data":[1,0,1],'
               '"name":"Shelf","type":"tilelayer"}],\n "nextlayerid":3,\n'
               ' "orientation":"orthogonal",\n "tiledversion":"1.9.2",\n "width":6 }')
+
+
+
+# A minimal export: enough shape for the gate to reach the checks under test.
+GATE_SPRITE = """%YAML 1.1
+--- !u!213 &21300000
+Sprite:
+  m_Name: icon
+  m_Rect:
+    serializedVersion: 2
+    x: 4
+    y: 8
+    width: 16
+    height: 16
+  m_Offset: {x: 0, y: 0}
+  m_RD:
+    texture: {fileID: 2800000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+    settingsRaw: 1
+"""
+
+
+def status_of(report, needle: str) -> str | None:
+    """The verdict of the one check that talks about `needle`."""
+    for check_result in report.checks:
+        if needle in check_result.message:
+            return check_result.status
+    return None
+
+
+def make_export(root: Path) -> None:
+    (root / "Sprite").mkdir(parents=True, exist_ok=True)
+    (root / "Prefab").mkdir(parents=True, exist_ok=True)
+    (root / "Prefab" / "Thing.prefab").write_text("--- !u!1 &1\nGameObject:\n")
+    (root / "Prefab" / "Thing.prefab.meta").write_text("guid: " + "a" * 32 + "\n")
+    (root / "Sprite" / "icon.asset").write_text(GATE_SPRITE)
+    (root / "Sprite" / "icon.asset.meta").write_text("guid: " + "c" * 32 + "\n")
+    (root / "Texture2D").mkdir(exist_ok=True)
+    (root / "Texture2D" / "atlas.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+
+def gate_checks() -> None:
+    """Metadata in, scripts out - or a stated reason why not."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "Assets"
+        make_export(root)
+        with_metadata = {"il2cpp": {"metadata": ["assets/bin/Data/.../global-metadata.dat"]}}
+
+        report = diagnose_export(root, None, with_metadata)
+        check("metadata staged but no scripts is a failure",
+              status_of(report, "no .cs files"), "fail")
+        check("and it says what to do about it",
+              any("re-export" in (c.remedy or "") for c in report.checks
+                  if "no .cs files" in c.message), True)
+
+        # The same absence, with nothing staged that could have produced them, is a
+        # limit of the build rather than a fault in the run.
+        report = diagnose_export(root, None, {})
+        check("no metadata and no scripts is only a warning",
+              status_of(report, "no .cs files"), "warn")
+
+        # A caller that knows nothing about staging must not be told off for it.
+        report = diagnose_export(root, None, None)
+        check("an unknown staging plan does not manufacture a failure",
+              status_of(report, "no .cs files"), "warn")
+
+        # One script against thousands of assets is the shape the real miss took:
+        # present, so a presence check passes it, and useless.
+        (root / "Scripts").mkdir()
+        (root / "Scripts" / "Board.cs").write_text("public enum Obstacle { Crate }\n")
+        for number in range(600):
+            (root / "Prefab" / f"filler_{number}.prefab.meta").write_text("guid: x\n")
+        report = diagnose_export(root, None, with_metadata)
+        check("a single script against a large export is still a failure",
+              status_of(report, "only 1 .cs files"), "fail")
+
+        for number in range(40):
+            (root / "Scripts" / f"Type{number}.cs").write_text("class T {}\n")
+        report = diagnose_export(root, None, with_metadata)
+        check("scripts in proportion clear the gate",
+              status_of(report, ".cs files ->"), "ok")
+
+        check("the export still reports its GUID graph",
+              status_of(report, ".meta files ->"), "ok")
+
+
+def absent_tree_checks() -> None:
+    """A staging tree that was never materialised must not read as a broken one."""
+    import json
+    with tempfile.TemporaryDirectory() as temporary:
+        staging = Path(temporary) / "dry"
+        staging.mkdir()
+        (staging / "manifest.json").write_text(json.dumps({
+            "dry_run": True, "staged_root": None, "staged_count": 0,
+            "packages": [], "packaging": {"shape": "single package"},
+            "warnings": [], "errors": []}))
+
+        report = diagnose_staging(staging)
+        check("an absent tree is reported once, not as every consequence",
+              len([c for c in report.checks if "no staged tree" in c.message]), 1)
+        check("what the manifest did find is still reported",
+              any("package(s) staged" in c.message for c in report.checks), True)
+        check("and it does not block", report.blockers, [])
+        check("the reason names the dry run",
+              any("dry run" in c.message for c in report.checks), True)
+        check("and it says how to fix it",
+              any("assetlab.ingest" in (c.remedy or "") for c in report.checks), True)
+
+
+def corpus_checks() -> None:
+    """Three answers about levels, not two."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "Assets"
+        make_export(root)
+
+        checks = diagnose_levels(root)
+        check("an export with no level data says so plainly",
+              "NOT DETECTED" in checks[0].message, True)
+
+        # Twenty indexed data files in one directory: a level set in a format the
+        # parser does not read.
+        levels_dir = root / "Resources" / "maps"
+        levels_dir.mkdir(parents=True)
+        for number in range(1, 21):
+            (levels_dir / f"stage_{number}.dat").write_text("binary-ish")
+        checks = diagnose_levels(root)
+        check("an unreadable corpus is detected, not called absent",
+              "DETECTED BUT UNSUPPORTED" in checks[0].message, True)
+        check("and the finding names where it is",
+              "Resources/maps" in checks[0].message, True)
+
+        found = corpus_candidates(root)
+        check("the candidate is counted", found[0]["count"], 20)
+        check("and its naming pattern is reported", found[0]["pattern"], "stage_#.dat")
+
+        # Configuration files sitting together are not a corpus: nothing indexes them.
+        settings = root / "Resources" / "config"
+        settings.mkdir(parents=True)
+        for name in ("audio", "graphics", "input", "network", "locale", "ads",
+                     "analytics", "shop", "push", "debug", "iap", "remote"):
+            (settings / f"{name}.json").write_text("{}")
+        check("unrelated config files are not mistaken for levels",
+              [entry for entry in corpus_candidates(root)
+               if entry["directory"].endswith("config")], [])
+
+
+
+def make_catalogue(directory: Path, assets: int, mechanics: int, features: int) -> None:
+    """A catalogue with only the columns the outcome check reads."""
+    import sqlite3
+    directory.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(directory / "assetlab.db")
+    conn.execute("CREATE TABLE assets (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE tags (asset_id INTEGER, kind TEXT, value TEXT)")
+    conn.execute("CREATE TABLE sprites (asset_id INTEGER)")
+    conn.execute("CREATE TABLE refs (src INTEGER)")
+    conn.execute("CREATE TABLE animations (asset_id INTEGER)")
+    conn.executemany("INSERT INTO assets (id) VALUES (?)",
+                     [(n,) for n in range(1, assets + 1)])
+    conn.executemany("INSERT INTO tags (asset_id, kind, value) VALUES (?,?,?)",
+                     [(1, "mechanic", f"m{n}") for n in range(mechanics)]
+                     + [(1, "feature", f"f{n}") for n in range(features)])
+    conn.commit()
+    conn.close()
+
+
+def outcome_checks() -> None:
+    """The vocabulary ratio, and the small build it must not accuse."""
+    with tempfile.TemporaryDirectory() as temporary:
+        gallery = Path(temporary)
+        # Four healthy peers, in the range the real catalogues occupy.
+        for number, (assets, mechanics, features) in enumerate(
+                [(20000, 69, 256), (11000, 132, 353), (27000, 190, 747),
+                 (37000, 147, 674)]):
+            make_catalogue(gallery / f"peer{number}", assets, mechanics, features)
+
+        # The shape the real miss took: many features, almost no mechanics.
+        make_catalogue(gallery / "thin", 31000, 11, 1630)
+        report = diagnose_outcome(gallery / "thin")
+        check("a vocabulary inconsistent with itself is flagged",
+              [c.status for c in report.checks if "inconsistent" in c.message], ["fail"])
+        check("but it never blocks the run", report.blockers, [])
+
+        # A small build is not a broken one: too few features for a ratio to mean
+        # anything, so no claim is made about it either way.
+        make_catalogue(gallery / "small", 1378, 19, 41)
+        report = diagnose_outcome(gallery / "small")
+        check("a small build is not accused", report.gaps, [])
+        check("and it is not silently called healthy either",
+              [c for c in report.checks if "self-consistent" in c.message], [])
+
+        make_catalogue(gallery / "sound", 19000, 69, 256)
+        report = diagnose_outcome(gallery / "sound")
+        check("a healthy build is confirmed",
+              [c.status for c in report.checks if "self-consistent" in c.message], ["ok"])
+        check("the peer comparison is reported",
+              any("against" in c.message and "peers" in c.message
+                  for c in report.checks), True)
+
+        # Too few peers to compare against is a fact, not a failure.
+        lonely = Path(temporary) / "alone"
+        make_catalogue(lonely / "only", 19000, 69, 256)
+        report = diagnose_outcome(lonely / "only")
+        check("with no peers the comparison is skipped, not faked",
+              any("too few to compare" in c.message for c in report.checks), True)
 
 
 def main() -> None:
@@ -342,6 +618,60 @@ SpriteMask:
     check("agreeing holders name the asset", graphed.get(1), "dynamitebox")
     check("a sprite shared by two obstacles is left alone", 2 in graphed, False)
     check("a holder with no design word votes for nothing", 3 in graphed, False)
+
+    # 13. Telling a 2D build from a 3D one. Each of these encodes a wrong turn:
+    #     `lit` hides inside `Unlit`, `Blit` and `Split`, and `Standard` inside
+    #     `2DxFX_Standard_GrayScale`, which is a sprite effect.
+    def kind(name: str) -> str:
+        if FLAT_SHADER_RE.search(name):
+            return "flat"
+        return "lit" if LIT_SHADER_RE.search(name) else "neither"
+
+    for shader in ("Universal Render Pipeline_Lit", "Custom_URP_StorybookSoftLit",
+                   "Custom_Standard_Clipped", "Toony Colors Pro 2_Hybrid Shader 2",
+                   "Shader Graphs_WaterSurface"):
+        check(f"lit shader: {shader}", kind(shader), "lit")
+
+    for shader in ("Universal Render Pipeline_Unlit", "Hidden_Universal_CoreBlit",
+                   "2DxFX_Standard_GrayScale", "Sprites_Default",
+                   "TextMeshPro_Distance Field", "Spine_Skeleton",
+                   "Universal Render Pipeline_Particles_Unlit"):
+        check(f"flat shader: {shader}", kind(shader), "flat")
+
+    check("curve clamps below the range", _curve(0.01, 0.05, 0.40), 0.0)
+    check("curve clamps above the range", _curve(0.90, 0.05, 0.40), 1.0)
+
+    # 14. The mesh/material/texture chain a 3D build is read through.
+    flat = parse_material(FLAT_MATERIAL)
+    check("flat material binds no texture", flat["textures"], [])
+    # An unbound slot is still serialised; counting slots rather than bindings is
+    # what made a 2D build look 100% lit.
+    check("flat material keeps its colour", flat["colour"]["hex"], "#1a2251")
+
+    textured = parse_material(TEXTURED_MATERIAL)
+    check("bound texture is found",
+          [(t["slot"], t["guid"]) for t in textured["textures"]],
+          [("BaseMap", "a" * 32)])
+
+    models = parse_prefab_models(MODEL_PREFAB)
+    check("one model found", len(models), 1)
+    check("mesh resolved", models[0]["mesh_guid"], "b" * 32)
+    check("both materials kept", models[0]["material_guids"],
+          ["c" * 32, "d" * 32])
+    check("object path excludes the root", models[0]["path"], "Chair")
+    check("static geometry is not marked rigged", models[0]["skinned"], False)
+
+    skinned = parse_prefab_models(MODEL_PREFAB.replace(
+        """--- !u!33 &3300
+MeshFilter:""", """--- !u!137 &13700
+SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
+                                 "--- !u!23 &2300\nMeshRenderer:"))
+    check("skinned renderer is marked rigged", skinned[0]["skinned"], True)
+
+    gate_checks()
+    absent_tree_checks()
+    corpus_checks()
+    outcome_checks()
 
     for line in FAILED:
         print("FAIL", line)
