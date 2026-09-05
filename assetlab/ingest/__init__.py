@@ -11,9 +11,10 @@ Nothing here is game specific; layouts are discovered from file magics and paths
 """
 
 from .containers import ResolvedPackage, resolve_packages
-from .detect import Member, PackageReport, choose_abi, classify, sniff_magic
+from .detect import (Member, PackageReport, choose_abi, classify, sniff_magic,
+                     unity_version)
 from .stage import ingest, print_summary, scan_package
 
 __all__ = ["ResolvedPackage", "resolve_packages", "Member", "PackageReport",
            "choose_abi", "classify", "sniff_magic", "ingest", "print_summary",
-           "scan_package"]
+           "scan_package", "unity_version"]

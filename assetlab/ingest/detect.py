@@ -59,6 +59,20 @@ MAGIC_NAMES = [
 
 SPLIT_PART_RE = re.compile(r"\.split\d+$")
 
+#: Unity stamps its exact version into the head of everything it serialises:
+#: `2021.3.16f1`, `6000.0.23f1`. UnityFS writes it after the format version and
+#: SerializedFile after the header - a header that grew at version 22 - so the
+#: string is matched rather than seeked to. That costs nothing and survives a
+#: container layout this code has never seen.
+VERSION_RE = re.compile(rb"(?<![\d.])(\d{1,4}\.\d{1,2}\.\d{1,3}[abfpx]\d{1,3})\x00")
+VERSION_HEAD = 192
+
+
+def unity_version(head: bytes) -> str | None:
+    """The Unity version a container declares, or None if it declares none."""
+    match = VERSION_RE.search(head[:VERSION_HEAD])
+    return match.group(1).decode("ascii") if match else None
+
 
 def serialized_file_version(head: bytes) -> int | None:
     """Unity SerializedFile (`globalgamemanagers`, `level0`, `sharedassets0.assets`).
@@ -104,6 +118,7 @@ class Member:
     abi: str | None = None
     evidence: list[str] = field(default_factory=list)
     confidence: str = "medium"
+    version: str | None = None
 
     @property
     def stageable(self) -> bool:
@@ -118,6 +133,9 @@ def classify(package: str, member: str, size: int, head: bytes) -> Member:
     evidence: list[str] = []
     if magic:
         evidence.append(f"magic:{magic}")
+    declared = unity_version(head)
+    if declared:
+        evidence.append(f"unity:{declared}")
 
     in_data_dir = bool(DATA_DIR_RE.search(lowered))
     if in_data_dir:
@@ -130,59 +148,60 @@ def classify(package: str, member: str, size: int, head: bytes) -> Member:
         evidence.append(f"abi:{abi}")
         if magic == "ELF" or lowered.endswith(".so"):
             return Member(package, member, size, NATIVE_LIB, magic, abi,
-                          evidence, "high" if magic == "ELF" else "medium")
+                          evidence, "high" if magic == "ELF" else "medium", declared)
 
     if name == "global-metadata.dat" or magic == "il2cpp-metadata":
         evidence.append("name:global-metadata.dat" if name == "global-metadata.dat"
                         else "magic:0xFAB11BAF")
-        return Member(package, member, size, IL2CPP_METADATA, magic, abi, evidence, "high")
+        return Member(package, member, size, IL2CPP_METADATA, magic, abi, evidence,
+                      "high", declared)
 
     if in_data_dir and "/managed/" in lowered:
         evidence.append("path:bin/Data/Managed")
-        return Member(package, member, size, MANAGED, magic, abi, evidence, "high")
+        return Member(package, member, size, MANAGED, magic, abi, evidence, "high", declared)
 
     if magic == "UnityFS":
         # A UnityFS file inside bin/Data is the player's own data; anywhere else
         # it is asset-pack content (assets/android/..., assets/aa/..., *.ab).
         role = UNITY_DATA if in_data_dir else ASSET_BUNDLE
-        return Member(package, member, size, role, magic, abi, evidence, "high")
+        return Member(package, member, size, role, magic, abi, evidence, "high", declared)
 
     # Loose player data: no ASCII magic, so the header has to be decoded.
     version = serialized_file_version(head)
     if version is not None and in_data_dir:
         evidence.append(f"serialized-file:v{version}")
         return Member(package, member, size, UNITY_DATA, "SerializedFile", abi,
-                      evidence, "high")
+                      evidence, "high", declared)
     if SPLIT_PART_RE.search(lowered) and in_data_dir:
         # `sharedassets0.assets.split1` - only part 0 carries the header.
         evidence.append("split part of a serialized file")
-        return Member(package, member, size, UNITY_DATA, magic, abi, evidence, "high")
+        return Member(package, member, size, UNITY_DATA, magic, abi, evidence, "high", declared)
 
     if magic in {"zip", "gzip"} and lowered.startswith("assets/"):
         evidence.append("archive nested inside the package")
-        return Member(package, member, size, NESTED_ARCHIVE, magic, abi, evidence, "high")
+        return Member(package, member, size, NESTED_ARCHIVE, magic, abi, evidence, "high", declared)
 
     if lowered.endswith((".resource", ".ress", ".resS".lower())):
         evidence.append("ext:resource-stream")
-        return Member(package, member, size, RESOURCE_STREAM, magic, abi, evidence, "high")
+        return Member(package, member, size, RESOURCE_STREAM, magic, abi, evidence, "high", declared)
 
     if magic == "json" and (in_data_dir or "/aa/" in lowered or "/android/" in lowered
                             or name.endswith(("catalog.json", "settings.json"))
                             or "config" in name):
         evidence.append("json descriptor next to Unity content")
-        return Member(package, member, size, CATALOG, magic, abi, evidence, "medium")
+        return Member(package, member, size, CATALOG, magic, abi, evidence, "medium", declared)
 
     if in_data_dir:
         # boot.config, unity default resources, sharedassets, ScriptingAssemblies...
-        return Member(package, member, size, UNITY_SUPPORT, magic, abi, evidence, "high")
+        return Member(package, member, size, UNITY_SUPPORT, magic, abi, evidence, "high", declared)
 
     if lowered.startswith("assets/"):
         if magic in (None, "FMOD-FSB5"):
             evidence.append("under assets/ but no Unity signature")
-            return Member(package, member, size, UNKNOWN_BINARY, magic, abi, evidence, "low")
-        return Member(package, member, size, OTHER, magic, abi, evidence, "medium")
+            return Member(package, member, size, UNKNOWN_BINARY, magic, abi, evidence, "low", declared)
+        return Member(package, member, size, OTHER, magic, abi, evidence, "medium", declared)
 
-    return Member(package, member, size, OTHER, magic, abi, evidence, "high")
+    return Member(package, member, size, OTHER, magic, abi, evidence, "high", declared)
 
 
 @dataclass

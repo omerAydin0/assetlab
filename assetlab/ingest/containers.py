@@ -55,12 +55,52 @@ def _extract_container(container: Path, work_dir: Path,
     return found
 
 
+#: How far below a given directory to look before giving up. A user who points at
+#: an unpacked build usually means "the packages are in here somewhere", but an
+#: unbounded walk from a project root would collect every unrelated APK on the disk.
+MAX_DEPTH = 4
+
+
+def _scan_directory(target: Path) -> tuple[list[Path], list[Path]]:
+    """Find packages under a directory, shallowest first.
+
+    The first depth that holds anything wins, and deeper levels are not read. That
+    is the difference between a split set sitting in a folder and the same folder
+    also containing a staging tree with copies inside it: the copies are further
+    down, so they never compete with what the user actually pointed at.
+    """
+    level = [target]
+    for _ in range(MAX_DEPTH):
+        loose, containers, deeper = [], [], []
+        for directory in level:
+            try:
+                entries = sorted(directory.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if path.is_dir():
+                    deeper.append(path)
+                elif path.suffix.lower() == APK_SUFFIX:
+                    loose.append(path)
+                elif _is_container(path):
+                    containers.append(path)
+        if loose or containers:
+            return loose, containers
+        if not deeper:
+            break
+        level = deeper
+    return [], []
+
+
 def resolve_packages(target: Path, work_dir: Path) -> tuple[list[ResolvedPackage], list[str]]:
     """Return every APK reachable from `target`, de-duplicated by file name.
 
     Loose APKs win over container copies of the same name, because a user who
     already unpacked a build normally means those. The container is still read so
     that pieces missing from the loose set (commonly the ABI split) are recovered.
+
+    A directory is searched to a bounded depth, shallowest level first, so pointing
+    at either a folder of packages or the folder that contains one works.
     """
     warnings: list[str] = []
     loose: list[Path] = []
@@ -69,13 +109,7 @@ def resolve_packages(target: Path, work_dir: Path) -> tuple[list[ResolvedPackage
     if target.is_file():
         (containers if _is_container(target) else loose).append(target)
     elif target.is_dir():
-        for path in sorted(target.iterdir()):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() == APK_SUFFIX:
-                loose.append(path)
-            elif _is_container(path):
-                containers.append(path)
+        loose, containers = _scan_directory(target)
     else:
         warnings.append(f"input not found: {target}")
         return [], warnings

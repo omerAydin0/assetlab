@@ -19,12 +19,16 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from collections import Counter
+
 from .containers import ResolvedPackage, resolve_packages
 from .detect import (ASSET_BUNDLE, IL2CPP_METADATA, MANAGED, NATIVE_LIB, NESTED_ARCHIVE,
                      RESOURCE_STREAM, UNITY_DATA, UNKNOWN_BINARY, Member, PackageReport,
                      choose_abi, classify)
 
-HEAD_BYTES = 16
+# Enough to carry the Unity version string that follows a container header.
+# Reading 192 bytes from a zip member costs the same syscall as reading 16.
+HEAD_BYTES = 192
 SNIFF_PREFIXES = ("assets/", "lib/")
 
 
@@ -55,6 +59,35 @@ def scan_package(package: ResolvedPackage) -> tuple[PackageReport, list[str]]:
     return PackageReport(package.name, str(package.path), package.size, members), warnings
 
 
+def scan_tree(root: Path) -> PackageReport:
+    """Classify an already-unpacked build, as if the directory were one package.
+
+    Paths are made relative to the root and posix-style so they read the same as
+    the zip entries they would have been, which is what lets every downstream
+    check treat both inputs identically.
+    """
+    members: list[Member] = []
+    total = 0
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                head = handle.read(HEAD_BYTES)
+        except OSError:
+            continue
+        total += size
+        members.append(classify(root.name, relative, size, head))
+    return PackageReport(root.name, str(root), total, members)
+
+
+def looks_unpacked(report: PackageReport) -> bool:
+    """Whether a directory holds a build rather than merely holding files."""
+    return report.count(UNITY_DATA) > 0 or report.count(ASSET_BUNDLE) > 0
+
+
 def content_roots(members: list[Member]) -> list[dict]:
     """Group asset-pack bundles by their top directories, e.g. assets/android."""
     groups: dict[str, dict] = {}
@@ -77,12 +110,153 @@ def content_roots(members: list[Member]) -> list[dict]:
     return result
 
 
+def declared_version(members: list[Member]) -> dict:
+    """The Unity version the build declares, and how unanimously it declares it.
+
+    Every serialised container stamps the version of the editor that wrote it, so a
+    build normally answers this hundreds of times over. Disagreement is worth
+    reporting rather than averaging away: it means content from two editor versions
+    is present, which is exactly the sort of thing that makes an export behave oddly.
+    """
+    votes: Counter[str] = Counter()
+    weight: Counter[str] = Counter()
+    for member in members:
+        if member.version:
+            votes[member.version] += 1
+            weight[member.version] += member.size
+    if not votes:
+        return {"version": None, "agreement": None, "sources": 0,
+                "note": "no container declared a version"}
+    # Ties are broken by bytes, not by which file the walk reached first. Unity's
+    # own shipped resources are built by whatever editor patch cut the installer,
+    # so on a build with few containers they can outvote the game's real payload;
+    # the payload is always the larger witness.
+    best = max(votes, key=lambda version: (votes[version], weight[version]))
+    total = sum(votes.values())
+    result = {"version": best, "agreement": round(votes[best] / total, 3),
+              "sources": total,
+              "example": next(m.path for m in members if m.version == best)}
+    if len(votes) > 1:
+        result["others"] = {v: n for v, n in votes.most_common() if v != best}
+    return result
+
+
+def packaging_shape(decisions: list[dict], packages: list[ResolvedPackage]) -> dict:
+    """Describe how this build was packaged, from what each package contributed.
+
+    Named structurally, never by product: a build is "base + 2 component packages"
+    because two staged packages carried no player data, not because of what the
+    files were called.
+    """
+    from_container = sorted({p.source.split(":", 1)[1] for p in packages
+                             if p.source.startswith("container:")})
+    staged = [d for d in decisions if d["included"]]
+    carriers, helpers = [], []
+    for decision in staged:
+        roles = decision["roles"]
+        (carriers if roles.get(UNITY_DATA) else helpers).append(decision["name"])
+
+    if not staged:
+        shape = "nothing stageable"
+    elif len(staged) == 1:
+        shape = "single package"
+    elif carriers:
+        shape = (f"{len(carriers)} player-data package(s) + "
+                 f"{len(helpers)} component package(s)")
+    else:
+        shape = f"{len(staged)} component packages, no player data among them"
+
+    return {
+        "form": "container" if from_container else "loose",
+        "containers": from_container,
+        "packages_seen": len(decisions),
+        "packages_staged": len(staged),
+        "shape": shape,
+        "player_data_from": carriers,
+        "components_from": helpers,
+    }
+
+
+def unpacked_manifest(target: Path, report: PackageReport, out_dir: Path) -> dict:
+    """Describe an already-unpacked build without copying a byte of it.
+
+    The tree is its own staged root. Nothing is filtered either, which is worth
+    saying plainly: with several ABIs present there is no way to leave one out
+    without rewriting the user's directory, so the staging gate refuses it and says
+    to point at the packages instead.
+    """
+    members = report.members
+    abis = {member.abi for member in members if member.role == NATIVE_LIB and member.abi}
+    warnings: list[str] = []
+    if len(abis) > 1:
+        warnings.append(
+            f"multiple ABIs present in the unpacked tree {sorted(abis)}; nothing is "
+            f"filtered because the tree is read where it lies - point at the "
+            f"original packages to have one chosen")
+    role_counts: dict[str, int] = {}
+    for member in members:
+        role_counts[member.role] = role_counts.get(member.role, 0) + 1
+
+    manifest = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "input": str(target),
+        "staged_root": str(target.resolve()),
+        "dry_run": False,
+        "chosen_abi": choose_abi(abis) if len(abis) == 1 else None,
+        "available_abis": sorted(abis),
+        "unity": declared_version(members),
+        "packaging": {"form": "unpacked", "containers": [], "packages_seen": 0,
+                      "packages_staged": 0,
+                      "shape": "already-unpacked build directory, read in place",
+                      "player_data_from": [], "components_from": []},
+        "packages": [{"name": report.name, "path": report.path, "size": report.size,
+                      "source": "unpacked", "included": True,
+                      "reason": f"{report.unity_relevant} Unity-relevant files, "
+                                f"read in place",
+                      "abis": sorted(report.abis), "roles": report.summary()}],
+        "unity_data_roots": sorted({
+            member.path.rsplit("/", 1)[0] for member in members
+            if member.role in {UNITY_DATA, MANAGED} and "/" in member.path}),
+        "content_roots": content_roots(members),
+        "il2cpp": {
+            "metadata": [m.path for m in members if m.role == IL2CPP_METADATA],
+            "native_libs": [m.path for m in members if m.role == NATIVE_LIB],
+        },
+        "resource_streams": [m.path for m in members if m.role == RESOURCE_STREAM],
+        "nested_archives": [{"path": m.path, "size": m.size, "magic": m.magic}
+                            for m in members if m.role == NESTED_ARCHIVE],
+        "role_counts": role_counts,
+        "unknown_binaries": [
+            {"path": m.path, "package": m.package, "size": m.size, "magic": m.magic}
+            for m in members if m.role == UNKNOWN_BINARY][:200],
+        "unknown_binary_total": sum(1 for m in members if m.role == UNKNOWN_BINARY),
+        # Nothing was staged because nothing needed to be; the count is what is
+        # there, so the readers that use it to mean "is there anything" still work.
+        "staged_files": [],
+        "staged_count": report.unity_relevant,
+        "warnings": warnings,
+        "errors": [],
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest
+
+
 def ingest(target: Path, out_dir: Path, dry_run: bool = False) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
     errors: list[str] = []
 
     packages, resolve_warnings = resolve_packages(target, out_dir)
+
+    # A directory with no packages in it may still be a build: the contents of one,
+    # already unpacked. That is a complete input, not a failed lookup.
+    if not packages and target.is_dir():
+        report = scan_tree(target)
+        if looks_unpacked(report):
+            return unpacked_manifest(target, report, out_dir)
+
     warnings.extend(resolve_warnings)
     if not packages:
         errors.append("no packages resolved from input")
@@ -166,7 +340,15 @@ def ingest(target: Path, out_dir: Path, dry_run: bool = False) -> dict:
                         continue
                     seen[name] = (package.name, info.file_size, info.CRC)
 
-                    destination = input_root / name
+                    # A zip entry names its own destination, and nothing stops it
+                    # naming one outside the tree ("assets/../../../evil"). Builds
+                    # come from wherever the user got them, so the resolved path is
+                    # checked rather than trusted. (Zip Slip, CVE-2018-1000544.)
+                    destination = (input_root / name).resolve()
+                    if not destination.is_relative_to(input_root.resolve()):
+                        collisions.append(
+                            f"{name}: entry escapes the staging tree, skipped")
+                        continue
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info) as source, destination.open("wb") as sink:
                         while chunk := source.read(1 << 20):
@@ -193,6 +375,8 @@ def ingest(target: Path, out_dir: Path, dry_run: bool = False) -> dict:
         "dry_run": dry_run,
         "chosen_abi": chosen_abi,
         "available_abis": sorted(available_abis),
+        "unity": declared_version(considered),
+        "packaging": packaging_shape(decisions, packages),
         "packages": decisions,
         "unity_data_roots": sorted({
             member.path.rsplit("/", 1)[0] for member in considered
@@ -223,6 +407,15 @@ def ingest(target: Path, out_dir: Path, dry_run: bool = False) -> dict:
 
 def print_summary(manifest: dict) -> None:
     print(f"input        {manifest['input']}")
+    shape = manifest.get("packaging") or {}
+    unity = manifest.get("unity") or {}
+    print(f"packaging    {shape.get('shape', '?')}"
+          + (f" from {', '.join(shape['containers'])}" if shape.get("containers") else ""))
+    if unity.get("version"):
+        print(f"unity        {unity['version']} "
+              f"({unity['agreement']:.0%} of {unity['sources']} containers agree)")
+    else:
+        print("unity        version not declared by any container")
     print(f"ABI          {manifest.get('chosen_abi')} "
           f"(available: {', '.join(manifest.get('available_abis') or []) or 'none'})")
     print("packages:")
