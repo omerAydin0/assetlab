@@ -61,6 +61,13 @@ FRAME_SIZE = 260
 # ------------------------------------------------------------------ clip reading
 
 
+def humanoid_clip(text: str) -> bool:
+    """Whether a clip animates an Avatar's muscles rather than a hierarchy's bones."""
+    if len(EMPTY_CURVE_RE.findall(text)) < EMPTY_CURVE_KINDS:
+        return False
+    return bool(HUMANOID_ATTRIBUTE_RE.search(text))
+
+
 def parse_clip(text: str) -> dict:
     """Curves keyed by object path: {path: {'pos'|'rot'|'scale'|'euler': [(t, v)]}}."""
     tracks: dict[str, dict[str, list]] = {}
@@ -151,6 +158,17 @@ MATERIALS_RE = re.compile(r"^  m_Materials:\s*\n((?:\s*- \{fileID:[^\n]*\n)*)", 
 #: The component that plays the clip. Its GameObject is the root every path in the
 #: clip is written relative to.
 ANIMATOR = 95
+
+#: Attributes a humanoid clip animates instead of bones. Unity stores muscle values
+#: and IK goals here and rebuilds the skeleton from the Avatar at runtime, so a
+#: clip carrying only these has no per-bone transforms to read.
+HUMANOID_ATTRIBUTE_RE = re.compile(
+    r"attribute: (?:Root[QT]|\w*(?:Hand|Foot|Arm|Leg|Spine|Head|Neck|Chest|Hips|"
+    r"Shoulder|Toes|Eye|Jaw|Thumb|Index|Middle|Ring|Little)\w*)[.\s]", re.I)
+#: Transform curve arrays are written as `m_RotationCurves: []` when empty.
+EMPTY_CURVE_RE = re.compile(
+    r"m_(?:Rotation|CompressedRotation|Euler|Position|Scale)Curves: \[\]")
+EMPTY_CURVE_KINDS = 5
 
 
 def parse_rigs(text: str) -> list[dict]:
@@ -314,7 +332,10 @@ def build(assets_root: Path, conn: sqlite3.Connection, out_dir: Path) -> dict[st
             guid for guid in dict.fromkeys(GUID_RE.findall(body))
             if by_guid.get(guid, {}).get("rel_path", "").endswith(".anim")]
 
-    stats = {"rigs": 0, "clips": 0, "poses": 0, "frames": 0}
+    stats = {"rigs": 0, "clips": 0, "poses": 0, "frames": 0, "humanoid": 0}
+    # One clip is reachable from every rig that shares its controller, so counting
+    # occurrences would report a handful of clips as hundreds.
+    humanoid_seen: set[str] = set()
     for prefab_id, clip_guids in clips_for.items():
         if not clip_guids:
             continue
@@ -361,11 +382,17 @@ def build(assets_root: Path, conn: sqlite3.Connection, out_dir: Path) -> dict[st
         for clip_guid in clip_guids:
             asset = by_guid[clip_guid]
             try:
-                clip = parse_clip((assets_root / asset["rel_path"]).read_text(
-                    encoding="utf-8", errors="ignore"))
+                text_of_clip = (assets_root / asset["rel_path"]).read_text(
+                    encoding="utf-8", errors="ignore")
             except OSError:
                 continue
+            clip = parse_clip(text_of_clip)
             if not clip["tracks"]:
+                # A humanoid clip is not an empty one. Counting it apart is the
+                # difference between "this build has no animation" and "its
+                # animation is stored in a form this tool cannot pose".
+                if humanoid_clip(text_of_clip):
+                    humanoid_seen.add(clip_guid)
                 continue
 
             # A clip one frame long is a pose. Sampling it sixteen times would
@@ -409,6 +436,11 @@ def build(assets_root: Path, conn: sqlite3.Connection, out_dir: Path) -> dict[st
                  clip["rate"], len(frames), prefab["name"],
                  f"rigged {'pose' if is_pose else 'motion'} · "
                  f"{len(clip['tracks'])} bones", asset["id"]))
+    stats["humanoid"] = len(humanoid_seen)
+    if humanoid_seen:
+        print(f"  {len(humanoid_seen)} humanoid clip(s) carry muscle curves rather "
+              f"than bone transforms; Unity rebuilds those from the Avatar at "
+              f"runtime, so they are counted and not posed")
     conn.commit()
     return stats
 
