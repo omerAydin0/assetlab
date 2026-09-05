@@ -142,6 +142,8 @@ def mechanic_from_project_dir(rel_path: str) -> str | None:
 # 20 cell overlays there but its 113 board pieces in `ItemType` and 105 clearable
 # targets in `GoalType`, so a game with a new blocker every twenty levels looked
 # like it had fifteen. The board vocabulary is the union of all three.
+#: Enough of a file to tell whether it declares an enum at all.
+HEAD_SCAN = 200_000
 ENUM_RE = re.compile(r"\benum\s+(\w+)\s*\{(.*?)\}", re.S)
 ENUM_MEMBER_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?:=\s*-?\d+)?\s*,?\s*$", re.M)
 BOOSTER_ENUM_RE = re.compile(r"booster", re.I)
@@ -259,6 +261,83 @@ CODE_VOCABULARY_SKIP = {
     "handler", "helpers", "extensions", "blockmanager", "possiblematch", "match",
     "layout", "layouts", "queue", "boosters", "boosterselection",
 }
+
+
+#: An enum earns its place when this many of its members name something the build
+#: ships. Measured over four builds: the real vocabularies land between 8 and 67
+#: hits, and below six the list fills with incidental matches.
+ENUM_EVIDENCE_HITS = 6
+
+
+def own_assembly(scripts: Path) -> str | None:
+    """The directory holding the project's own code, found by weight not by name.
+
+    Unity compiles a project's own scripts into one assembly and every third-party
+    package into its own, so the game's code is the largest single root - it is
+    `Assembly-CSharp` in most builds and whatever the developer named it in others.
+    Guessing the name would fail on the second kind; counting files does not.
+    """
+    counts: dict[str, int] = {}
+    for path in scripts.rglob("*.cs"):
+        parts = path.relative_to(scripts).parts
+        if parts:
+            counts[parts[0]] = counts.get(parts[0], 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def asset_vocabulary(conn: sqlite3.Connection) -> set[str]:
+    """Every word the build's own asset names are made of."""
+    words: set[str] = set()
+    try:
+        rows = conn.execute("SELECT name FROM assets WHERE name IS NOT NULL")
+    except sqlite3.OperationalError:
+        return words
+    for (name,) in rows:
+        for part in re.split(r"[^A-Za-z0-9]+|(?<=[a-z])(?=[A-Z])", name):
+            key = normalise_mechanic(part)
+            if len(key) > 2:
+                words.add(key)
+    return words
+
+
+def scan_evidence_enums(assets_root: Path, conn: sqlite3.Connection) -> dict[str, str]:
+    """Design enums recognised by their members naming the build's own art.
+
+    Read only from the project's own assembly, because an SDK's enums match asset
+    names too - `MarkupTag`, `JsonToken` and `PrimitiveTypeCode` all outscored one
+    build's real vocabulary until the third-party code was excluded.
+    """
+    scripts = assets_root / "Scripts"
+    if not scripts.is_dir():
+        return {}
+    root = own_assembly(scripts)
+    if not root:
+        return {}
+    words = asset_vocabulary(conn)
+    if not words:
+        return {}
+
+    found: dict[str, str] = {}
+    for path in (scripts / root).rglob("*.cs"):
+        try:
+            with path.open("rb") as handle:
+                if b"enum " not in handle.read(HEAD_SCAN):
+                    continue
+            source = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name, body in ENUM_RE.findall(source):
+            if NON_BOARD_ENUM_RE.search(name):
+                continue
+            members = [member for member in ENUM_MEMBER_RE.findall(body)
+                       if member.lower() not in IGNORED_ENUM_MEMBERS]
+            keyed = [(normalise_mechanic(m), m) for m in members]
+            hits = [(key, shown) for key, shown in keyed
+                    if len(key) > 2 and key in words]
+            if len(hits) >= ENUM_EVIDENCE_HITS:
+                for key, shown in hits:
+                    found.setdefault(key, shown)
+    return found
 
 
 def scan_code_mechanics(assets_root: Path) -> dict[str, dict[str, str]]:
@@ -674,6 +753,16 @@ def classify(assets_root: Path, primary_content: Path | None,
     from_levels = scan_level_vocabulary(conn)
     for key, name in from_levels.items():
         families.setdefault(key, name)
+
+    # Fourth source: enums the named rule does not recognise, kept only when the
+    # build's own art names their members. Adds, never replaces.
+    from_evidence = scan_evidence_enums(assets_root, conn)
+    added = [name for key, name in from_evidence.items() if key not in families]
+    for key, name in from_evidence.items():
+        families.setdefault(key, name)
+    if added:
+        print(f"  evidence enums: {len(added)} more from the project's own assembly "
+              f"({', '.join(sorted(added)[:8])})")
 
     # Second source, for builds whose vocabulary is in the code rather than an enum.
     from_code = scan_code_mechanics(assets_root)
