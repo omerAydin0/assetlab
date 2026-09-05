@@ -27,8 +27,8 @@ import sqlite3
 import statistics
 
 from .ingest.detect import serialized_file_version
-from .levels import (DATA_SUFFIXES, corpus_candidates, flat_corpus_fits,
-                     looks_like_tiled)
+from .levels import (DATA_SUFFIXES, SCANNED_SUFFIXES, corpus_candidates,
+                     flat_corpus_fits, looks_like_tiled)
 from .slice_sprites import parse_sprite
 
 SPRITE_SAMPLE = 60
@@ -315,6 +315,7 @@ def diagnose_export(export: Path, primary: Path | None = None,
         counts[suffix] += 1
         if suffix == ".asset":
             sprite_assets.append(path)
+            data_files.append(path)
         elif suffix in DATA_SUFFIXES:
             data_files.append(path)
     # A large export holds thousands of non-sprite .asset files (MonoBehaviour and
@@ -426,7 +427,7 @@ def diagnose_levels(export: Path, files: list[Path] | None = None) -> list[Check
     """
     if files is None:
         files = [path for path in export.rglob("*")
-                 if path.suffix.lower() in DATA_SUFFIXES and path.is_file()]
+                 if path.suffix.lower() in SCANNED_SUFFIXES and path.is_file()]
 
     # Grouping is pure path arithmetic, so it runs before any file is opened.
     candidates = corpus_candidates(export, limit=8, files=files)
@@ -457,17 +458,31 @@ def diagnose_levels(export: Path, files: list[Path] | None = None) -> list[Check
         return [Check(OK, f"level corpus: {LEVELS_PARSED} - FlatBuffers, "
                           f"read with the build's own schema: {listed}")]
 
-    if not candidates:
-        return [Check(OK, f"level corpus: {LEVELS_ABSENT} - no likely level data "
-                          f"in the export")]
+    corpora = [entry for entry in candidates if entry.get("corpus")]
+    if corpora:
+        top = corpora[0]
+        listed = ", ".join(f"{c['directory']} ({c['count']} x {c['extension']})"
+                           for c in corpora[:3])
+        return [Check(WARN, f"level corpus: {LEVELS_UNREADABLE} - {listed}",
+                      f"{top['count']} files that look like one level set, in a format "
+                      f"the parser does not read (example: {top['example']}). That is "
+                      f"not the same finding as the game having no levels.")]
 
-    top = candidates[0]
-    listed = ", ".join(f"{c['directory']} ({c['count']} x {c['extension']})"
-                       for c in candidates[:3])
-    return [Check(WARN, f"level corpus: {LEVELS_UNREADABLE} - {listed}",
-                  f"{top['count']} files that look like one level set, in a format the "
-                  f"parser does not read (example: {top['example']}). That is not the "
-                  f"same finding as the game having no levels.")]
+    if candidates:
+        # Below the corpus threshold, but not nothing. A build can keep its design
+        # data in many small indexed sets - waves, live-ops, tuning tables - and
+        # answering "no likely level data" about those is how a reader concludes a
+        # game has no missions.
+        top = candidates[0]
+        named = ", ".join(entry["pattern"] for entry in candidates[:4])
+        return [Check(OK, f"level corpus: {LEVELS_ABSENT} - no single corpus, but "
+                          f"{len(candidates)} indexed data group(s): {named}",
+                      f"the largest is {top['count']} files in {top['directory']}. "
+                      f"This build spreads its design data across small sets rather "
+                      f"than one numbered corpus; nothing is parsed from them.")]
+
+    return [Check(OK, f"level corpus: {LEVELS_ABSENT} - no likely level data "
+                      f"in the export")]
 
 
 # --------------------------------------------------------------------- outcome

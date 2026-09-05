@@ -154,8 +154,34 @@ def looks_like_tiled(path: Path) -> bool:
 #: files, and counting those would report a level corpus in every build ever made.
 DATA_SUFFIXES = {".json", ".bytes", ".txt", ".xml", ".csv", ".tsv", ".dat",
                  ".yaml", ".yml", ".ini", ".lvl", ".map"}
+#: A build may keep its design data in ScriptableObjects instead of loose files.
+ASSET_SUFFIX = ".asset"
+SCANNED_SUFFIXES = DATA_SUFFIXES | {ASSET_SUFFIX}
+
+
+def serialised_objects(paths: list[Path], sample: int = 3) -> bool:
+    """Whether a group of `.asset` files holds MonoBehaviours rather than art."""
+    seen = 0
+    for path in sorted(paths)[:sample]:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                head = handle.read(ASSET_PROBE)
+        except OSError:
+            continue
+        seen += 1
+        if not MONOBEHAVIOUR_RE.search(head):
+            return False
+    return seen > 0
 #: Below this a directory is a handful of config files, not a corpus.
 MIN_CORPUS = 12
+#: Still worth naming, though. A build can keep its design data in many small
+#: indexed sets rather than one large one, and calling that "nothing" is wrong.
+MIN_GROUP = 4
+#: Unity's class id for a serialised designer object. A `.asset` file is a sprite
+#: (213), a texture (28) or a material (21) far more often than it is data, so the
+#: export's bulk is excluded by what the file says it is rather than where it sits.
+MONOBEHAVIOUR_RE = re.compile(r"^--- !u!114 ", re.M)
+ASSET_PROBE = 2048
 INDEX_RE = re.compile(r"\d+")
 
 
@@ -175,28 +201,38 @@ def corpus_candidates(root: Path, limit: int = 6,
     # slowest thing this module could do.
     if files is None:
         files = [path for path in root.rglob("*")
-                 if path.suffix.lower() in DATA_SUFFIXES and path.is_file()]
-    groups: dict[tuple[Path, str], list[str]] = {}
+                 if path.suffix.lower() in SCANNED_SUFFIXES and path.is_file()]
+    groups: dict[tuple[Path, str], list[Path]] = {}
     for path in files:
-        groups.setdefault((path.parent, path.suffix.lower()), []).append(path.name)
+        groups.setdefault((path.parent, path.suffix.lower()), []).append(path)
 
     found: list[dict] = []
-    for (directory, suffix), names in groups.items():
-        if len(names) < MIN_CORPUS:
+    for (directory, suffix), paths in groups.items():
+        if len(paths) < MIN_GROUP:
             continue
-        # `level_1`, `level_2`, ... all normalise to `level_#`; a directory of
-        # unrelated config files does not collapse onto one pattern at all.
-        patterns = Counter(INDEX_RE.sub("#", Path(name).stem) for name in names)
-        pattern, hits = patterns.most_common(1)[0]
-        if hits < MIN_CORPUS or "#" not in pattern:
+        if suffix == ASSET_SUFFIX and not serialised_objects(paths):
+            # A folder of sprites or materials, not of data.
             continue
         try:
             shown = directory.relative_to(root).as_posix()
         except ValueError:
             shown = directory.as_posix()
-        found.append({"directory": shown or ".", "extension": suffix, "count": hits,
-                      "pattern": pattern + suffix, "files_in_directory": len(names),
-                      "example": sorted(names)[0]})
+
+        # A corpus is a naming pattern, not a directory. One folder routinely holds
+        # several indexed sets side by side - waves, live-ops, gacha tables - and
+        # reporting only the largest hides every other one the build ships.
+        by_pattern: dict[str, list[str]] = {}
+        for path in paths:
+            by_pattern.setdefault(
+                INDEX_RE.sub("#", path.stem), []).append(path.name)
+        for pattern, members in by_pattern.items():
+            if len(members) < MIN_GROUP or "#" not in pattern:
+                continue
+            found.append({"directory": shown or ".", "extension": suffix,
+                          "count": len(members), "pattern": pattern + suffix,
+                          "files_in_directory": len(paths),
+                          "example": sorted(members)[0],
+                          "corpus": len(members) >= MIN_CORPUS})
     found.sort(key=lambda entry: -entry["count"])
     return found[:limit]
 
