@@ -1,4 +1,16 @@
-"""Run the whole pipeline: index -> graph -> slice -> classify -> dedup -> levels -> browser."""
+"""Run the analysis stages, adapting to what kind of build the export turns out to be.
+
+The stage order is not arbitrary. `profile` runs early because the stages after it
+ask whether their work applies at all: a build whose art is geometry has no atlas
+to cut and no sprite layers to compose, and `models` exists to cover it instead.
+`levels` runs before `classify` because the obstacle names it finds are what let
+classification label obstacle art from evidence.
+
+Two ways in. `--export` analyses an AssetRipper export that already exists.
+`--input` takes the Android package itself and runs the whole chain - discovery,
+staging, AssetRipper, then these stages - which is the same work with nothing left
+for a human to remember.
+"""
 
 from __future__ import annotations
 
@@ -6,66 +18,135 @@ import argparse
 import time
 from pathlib import Path
 
-from . import animations, browser, classify, dedup, graph, index, levels
+from . import (animations, browser, classify, dedup, graph, index, levels, models,
+               profile, skin)
 from .core import connect
 
+STAGE_NAMES = ("profile", "index", "graph", "slice", "models", "skin", "levels",
+               "animations", "classify", "dedup", "browser")
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Build an AssetLab research catalog from an AssetRipper export.")
-    parser.add_argument("--export", required=True, type=Path,
-                        help="ExportedProject/Assets from an AssetRipper 'Unity Project' export")
-    parser.add_argument("--out", required=True, type=Path, help="output directory")
-    parser.add_argument("--primary-content", type=Path, default=None,
-                        help="optional Primary Content Assets dir, adds AssetBundle provenance")
-    parser.add_argument("--title", default="AssetLab")
-    parser.add_argument("--rules", type=Path, default=None,
-                        help="per-game labelling rules; defaults to rules/<out name>.json")
-    parser.add_argument("--skip", nargs="*", default=[],
-                        help="stages to skip: index graph slice classify dedup levels browser")
-    args = parser.parse_args()
 
-    if not args.export.is_dir():
-        parser.error(f"export directory not found: {args.export}")
-    export = args.export.resolve()
-    out = args.out.resolve()
-    primary = args.primary_content.resolve() if args.primary_content else None
-    rules_path = args.rules or Path("rules") / f"{args.out.name}.json"
-    if rules_path.is_file():
-        print(f"rules      {rules_path}")
-    conn = connect(out / "assetlab.db")
+def analyse(export: Path, out: Path, title: str = "AssetLab",
+            primary: Path | None = None, rules_path: Path | None = None,
+            skip: tuple[str, ...] = (), conn=None) -> dict:
+    """Run every analysis stage over one export. Returns each stage's result.
+
+    The connection is optional so a caller that has already written provenance into
+    the catalogue can hand the same one over rather than reopening it.
+    """
+    close_after = conn is None
+    conn = conn or connect(out / "assetlab.db")
+    detected: dict = {}
+    results: dict = {}
+
+    def profile_stage() -> dict:
+        detected.update(profile.detect(export, conn))
+        print(profile.describe(detected))
+        return {"verdict": detected["verdict"], "score": detected["score"]}
+
+    def models_stage() -> dict:
+        # A 2D build has no mesh chain worth walking; saying so beats a row of zeros.
+        if detected.get("verdict") == "2d":
+            return {"skipped": "2D build, no mesh art to map"}
+        return models.build(export, conn, out)
+
+    def slice_stage() -> dict:
+        from .slice_sprites import slice_all
+        return slice_all(export, out, conn)
 
     stages = [
+        # First, so the stages after it know whether they apply.
+        ("profile", profile_stage),
         ("index", lambda: index.build_index(export, conn)),
         ("graph", lambda: graph.build_graph(export, conn)),
-        ("slice", lambda: slice_stage(export, out, conn)),
+        ("slice", slice_stage),
+        ("models", models_stage),
+        # Rigged clips have no sprite to show, so they are posed and drawn. Runs
+        # after models so the mesh and material caches are already warm.
+        ("skin", lambda: skin.build(export, conn, out)),
         # levels runs before classify: the obstacle layer names in the level corpus
         # are what let classify label obstacle art from evidence.
         ("levels", lambda: levels.scan_levels(export, conn)),
         ("animations", lambda: animations.build(export, conn)),
         ("classify", lambda: classify.classify(export, primary, conn, rules_path)),
         ("dedup", lambda: dedup.deduplicate(conn)),
-        ("browser", lambda: browser.build(out, export, args.title, conn)),
+        ("browser", lambda: browser.build(out, export, title, conn)),
     ]
-    for name, run in stages:
-        if name in args.skip:
+    for name, run_stage in stages:
+        if name in skip:
             print(f"[{name}] skipped")
+            results[name] = {"skipped": "asked to skip"}
             continue
         started = time.time()
         print(f"[{name}] ...", flush=True)
-        result = run()
-        print(f"[{name}] done in {time.time() - started:.1f}s -> {result}")
+        result = run_stage()
+        elapsed = time.time() - started
+        print(f"[{name}] done in {elapsed:.1f}s -> {result}")
+        results[name] = {"result": result, "seconds": round(elapsed, 1)}
 
-    if "levels" not in args.skip:
+    if "levels" not in skip:
         levels.report(conn, out)
+    if close_after:
+        conn.close()
+    return results
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Build an AssetLab research catalog from a package or an export.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input", type=Path, default=None,
+                        help="an .apk/.xapk/.apks/.apkm or a directory of them; runs "
+                             "discovery, staging and AssetRipper before analysing")
+    source.add_argument("--export", type=Path, default=None,
+                        help="ExportedProject/Assets from an AssetRipper Unity Project export")
+    parser.add_argument("--out", required=True, type=Path, help="output directory")
+    parser.add_argument("--primary-content", type=Path, default=None,
+                        help="optional Primary Content Assets dir, adds AssetBundle provenance")
+    parser.add_argument("--title", default=None,
+                        help="display name for the catalogue; defaults to the out folder")
+    parser.add_argument("--rules", type=Path, default=None,
+                        help="optional labelling overrides; defaults to rules/<out name>.json "
+                             "if that file happens to exist. Nothing requires it.")
+    parser.add_argument("--skip", nargs="*", default=[],
+                        help="stages to skip: " + " ".join(STAGE_NAMES))
+    # Only meaningful with --input.
+    parser.add_argument("--staging", type=Path, default=None,
+                        help="where to stage the package (default: staging/<out name>)")
+    parser.add_argument("--export-dir", type=Path, default=None,
+                        help="where AssetRipper writes (default: exports/<out name>)")
+    parser.add_argument("--exe", type=Path, default=None,
+                        help="AssetRipper.GUI.Free.exe; ignored if one already runs")
+    parser.add_argument("--port", type=int, default=5599)
+    parser.add_argument("--no-hub", action="store_true",
+                        help="skip rebuilding the combined hub page at the end")
+    parser.add_argument("--restage", action="store_true",
+                        help="re-stage and re-export even if previous output is present")
+    args = parser.parse_args()
+
+    out = args.out.resolve()
+    title = args.title or args.out.name
+    rules_path = args.rules or Path("rules") / f"{args.out.name}.json"
+    primary = args.primary_content.resolve() if args.primary_content else None
+
+    if args.input:
+        from .pipeline import run_pipeline
+        report = run_pipeline(
+            args.input.resolve(), out, title,
+            staging=args.staging.resolve() if args.staging else None,
+            export_dir=args.export_dir.resolve() if args.export_dir else None,
+            exe=args.exe, port=args.port, primary=primary,
+            rules_path=rules_path, skip=tuple(args.skip), restage=args.restage,
+            build_hub=not args.no_hub)
+        raise SystemExit(0 if report["status"] != "BLOCKED" else 1)
+
+    if not args.export.is_dir():
+        parser.error(f"export directory not found: {args.export}")
+    if rules_path.is_file():
+        print(f"rules      {rules_path}")
+    analyse(args.export.resolve(), out, title, primary, rules_path, tuple(args.skip))
     print(f"\nopen {out / 'browser.html'}")
     print(f"report {out / 'levels_report.md'}")
-    conn.close()
-
-
-def slice_stage(export: Path, out: Path, conn) -> dict:
-    from .slice_sprites import slice_all
-    return slice_all(export, out, conn)
 
 
 if __name__ == "__main__":

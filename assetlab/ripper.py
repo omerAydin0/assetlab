@@ -7,9 +7,11 @@ AssetRipper.GUI.Free hosts a documented web API (see /openapi.json) and takes
     load     -> POST /LoadFolder      {path}
     export   -> POST /Export/UnityProject {path}
 
-The four settings AssetLab depends on are enforced here rather than trusted:
-Sprite YAML and .meta GUIDs are what make sprite slicing and the reference graph
-possible at all.
+The settings AssetLab depends on are enforced here rather than trusted. Sprite YAML
+and .meta GUIDs are what make sprite slicing and the reference graph possible at
+all, and `ScriptExportMode` decides whether the script vocabulary exists: on the
+installation default the export quietly writes assemblies instead of C# and
+classification loses every name it would have read.
 
 Only stdlib is used, so this adds no dependency.
 """
@@ -18,7 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -26,11 +30,43 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+#: Where the executable is looked for when none is given. An installation this
+#: does not know about is named with --exe or ASSETRIPPER_EXE rather than guessed.
+EXE_ENV = "ASSETRIPPER_EXE"
+EXE_NAME = "AssetRipper.GUI.Free.exe"
+EXE_HINTS = (
+    Path("AssetRipper") / EXE_NAME,
+    Path.home() / "Desktop" / "AssetRipper" / EXE_NAME,
+    Path.home() / "AssetRipper" / EXE_NAME,
+    Path("C:/Program Files/AssetRipper") / EXE_NAME,
+)
+
+
+def find_exe(given: Path | None = None) -> Path | None:
+    """The AssetRipper executable, or None - in which case a running one may serve."""
+    if given:
+        return given if Path(given).is_file() else None
+    from_env = os.environ.get(EXE_ENV)
+    if from_env and Path(from_env).is_file():
+        return Path(from_env)
+    for hint in EXE_HINTS:
+        if hint.is_file():
+            return hint
+    found = shutil.which(EXE_NAME) or shutil.which("AssetRipper.GUI.Free")
+    return Path(found) if found else None
+
 REQUIRED_SETTINGS = {
     "BundledAssetsExportMode": "DirectExport",
     "SpriteExportMode": "Yaml",
     "ImageExportFormat": "Png",
     "AudioExportFormat": "Default",
+    # Without this the export writes assemblies instead of C#, so there is no
+    # enum or type vocabulary for classification to read - and nothing fails
+    # while it happens. `Hybrid`, the installation default, is exactly that case.
+    "ScriptExportMode": "Decompiled",
+    # Method bodies, which is where mechanic names appear when a build declares
+    # them in code rather than in an enum.
+    "ScriptContentLevel": "Level2",
 }
 
 SELECT_RE = re.compile(r'<select[^>]*\bname="([^"]+)"[^>]*>(.*?)</select>', re.S)
@@ -234,9 +270,10 @@ def main() -> None:
     parser.add_argument("--input", required=True, type=Path,
                         help="staged input tree (assetlab.ingest output 'input' folder)")
     parser.add_argument("--out", required=True, type=Path, help="export destination")
-    parser.add_argument("--exe", type=Path,
-                        default=Path("C:/Users/WİN11/Desktop/AssetRipper/AssetRipper.GUI.Free.exe"),
-                        help="AssetRipper.GUI.Free.exe; ignored if one already runs on --port")
+    parser.add_argument("--exe", type=Path, default=None,
+                        help="AssetRipper.GUI.Free.exe; found automatically when it "
+                             "sits in a usual place, and ignored entirely if one is "
+                             "already running on --port")
     parser.add_argument("--port", type=int, default=5599)
     parser.add_argument("--keep-running", action="store_true",
                         help="leave AssetRipper up afterwards (useful for several games)")
@@ -244,7 +281,8 @@ def main() -> None:
 
     if not args.input.is_dir():
         parser.error(f"input directory not found: {args.input}")
-    exported = rip(args.input, args.out, args.exe, args.port, args.keep_running)
+    exported = rip(args.input, args.out, find_exe(args.exe), args.port,
+                   args.keep_running)
     print(f"\nNext: python -m assetlab.run --export \"{exported}\" --out \"out/<name>\"")
 
 
