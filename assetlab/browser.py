@@ -103,6 +103,11 @@ aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(-
   grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin:0 0 22px}
 .scenehead{grid-column:1/-1;font:600 13px/1.5 inherit;color:var(--dim);
   letter-spacing:.04em;text-transform:uppercase;margin:0 0 10px}
+.maptex{margin:0;position:relative;max-width:46%;display:flex;flex-direction:column;
+  align-items:center;justify-content:center}
+.maptex img{max-width:100%;max-height:100%;opacity:.65}
+.maptex figcaption{position:absolute;bottom:2px;font:600 9px/1.4 inherit;
+  letter-spacing:.03em;color:#cfd6e2;background:#0009;border-radius:3px;padding:0 4px}
 .modelshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
  align-items:center;justify-content:center;gap:4px;padding:5px;overflow:hidden}
 .modelshots img{width:auto;height:auto;max-width:46%;max-height:100%;
@@ -547,16 +552,34 @@ function swatch(colour){
 // A model's own picture beats anything its materials can show. The texture strip
 // stays as the fallback for geometry the renderer could not read - a mesh whose data
 // lives in an external .resS, say - because half a card is better than none.
+// BaseMap/MainTex is what a surface looks like; a normal, mask or roughness map
+// describes how it reacts to light and reads as a flat wash of colour. Showing one
+// as a model's face is how a lavender square comes to stand for a building.
+const ALBEDO_SLOTS = ["MainTex", "BaseMap", "BaseColorMap", "MainTexture", "Albedo"];
+function isAlbedo(texture){
+  return ALBEDO_SLOTS.includes(String(texture.slot || "").replace(/^_/, ""));
+}
 function materialStrip(model){
   const shots = [];
   for (const material of model.materials){
-    for (const texture of material.textures.slice(0, 2))
-      shots.push(`<img loading="lazy" src="${texture.img}" title="${texture.name}">`);
-    if (!material.textures.length && material.colour)
+    const maps = (material.textures || []).slice();
+    maps.sort((a, b) => (isAlbedo(b) ? 1 : 0) - (isAlbedo(a) ? 1 : 0));
+    // Without an albedo the material's own colour is the honest answer, so it
+    // leads and the maps follow it as what they are.
+    if (!maps.some(isAlbedo) && material.colour)
+      shots.push(`<div class="flat" style="background:${material.colour.hex}"
+        title="${material.name} base colour"></div>`);
+    for (const texture of maps.slice(0, 2))
+      shots.push(isAlbedo(texture)
+        ? `<img loading="lazy" src="${texture.img}" title="${texture.name}">`
+        : `<figure class="maptex"><img loading="lazy" src="${texture.img}"
+             title="${texture.name}"><figcaption>${
+             String(texture.slot).replace(/^_/, "")}</figcaption></figure>`);
+    if (!maps.length && material.colour)
       shots.push(`<div class="flat" style="background:${material.colour.hex}"></div>`);
   }
-  return `<div class="modelshots">${shots.slice(0, 4).join("")
-    || `<span style="color:#5c6675">no material</span>`}</div>`;
+  return `<div class="modelshots">${shots.slice(0, 4).join("") ||
+    `<span style="color:#5c6675">no material</span>`}</div>`;
 }
 function modelCard(model, i){
   const body = model.render

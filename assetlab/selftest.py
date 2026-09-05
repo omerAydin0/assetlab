@@ -14,6 +14,7 @@ from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
 from .classify import (feature_from_project_dir, feature_from_container_path,
                        match_vocabulary, mechanics_from_holders)
 from .core import infer_type
+from .mesh import parse_mesh
 from .models import parse_material, parse_prefab_models
 from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
 from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
@@ -273,6 +274,75 @@ def make_export(root: Path) -> None:
     (root / "Texture2D" / "atlas.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
 
+def mesh_layout(vertices: int, stride_channels: str, blob: bytes,
+                data_size: int) -> str:
+    """A Mesh asset with just the fields the vertex reader looks at."""
+    return f"""%YAML 1.1
+--- !u!43 &4300000
+Mesh:
+  m_Name: probe
+  m_SubMeshes:
+  - firstByte: 0
+    indexCount: 3
+    topology: 0
+    firstVertex: 0
+    vertexCount: {vertices}
+  m_MeshCompression: 0
+  m_IndexFormat: 0
+  m_IndexBuffer: 000001000200
+  m_VertexData:
+    m_VertexCount: {vertices}
+    m_Channels:
+{stride_channels}
+    m_DataSize: {data_size}
+    _typelessdata: {blob.hex()}
+"""
+
+
+def channel(stream: int, offset: int, fmt: int, dimension: int) -> str:
+    return (f"    - stream: {stream}\n      offset: {offset}\n"
+            f"      format: {fmt}\n      dimension: {dimension}\n")
+
+
+def mesh_checks() -> None:
+    """The vertex buffer's own arithmetic, where a mistake reads as noise."""
+    import struct
+
+    # One stream: position float32 x3 (12) + two float16 x4 (8+8) + unorm8 x4 (4)
+    # + float16 x2 (4) = 36 bytes a row. Five rows is 180, which is deliberately
+    # not a multiple of 16 - the case the reader used to reject.
+    channels = (channel(0, 0, 0, 3) + channel(0, 12, 1, 4) + channel(0, 20, 1, 4)
+                + channel(0, 28, 2, 4) + channel(0, 32, 1, 2))
+    rows = b""
+    for index in range(5):
+        rows += struct.pack("<fff", float(index), float(index) * 2, 0.0)
+        rows += b"\x00" * 24
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "probe.asset"
+
+        path.write_text(mesh_layout(5, channels, rows, len(rows)), encoding="utf-8")
+        parsed = parse_mesh(path)
+        check("a single stream is not padded past its own rows",
+              parsed is not None and len(parsed.vertices), 5)
+        if parsed is not None:
+            check("and the positions survive the walk",
+                  [round(float(v[0]), 3) for v in parsed.vertices], [0.0, 1.0, 2.0, 3.0, 4.0])
+
+        # The high nibble of `dimension` carries flags, not components: 0x34 is
+        # four components, and reading 52 of them would blow the stride apart.
+        flagged = (channel(0, 0, 0, 3) + channel(0, 12, 1, 0x34) + channel(0, 20, 1, 4)
+                   + channel(0, 28, 2, 4) + channel(0, 32, 1, 2))
+        path.write_text(mesh_layout(5, flagged, rows, len(rows)), encoding="utf-8")
+        check("dimension flags are masked off",
+              parse_mesh(path) is not None, True)
+
+        # A declared size the strides cannot reproduce means the layout is not
+        # understood, and reading it anyway would return convincing nonsense.
+        path.write_text(mesh_layout(5, channels, rows, len(rows) + 64), encoding="utf-8")
+        check("a size that does not add up is still refused",
+              parse_mesh(path), None)
+
+
 def gate_checks() -> None:
     """Metadata in, scripts out - or a stated reason why not."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -396,6 +466,47 @@ def make_catalogue(directory: Path, assets: int, mechanics: int, features: int) 
                      + [(1, "feature", f"f{n}") for n in range(features)])
     conn.commit()
     conn.close()
+
+
+def scriptable_corpus_checks() -> None:
+    """Design data serialised as ScriptableObjects, and the art it must not catch.
+
+    A `.asset` file is a sprite or a material far more often than it is data, so
+    the two are told apart by the class the YAML declares rather than by the folder
+    the exporter happened to put them in.
+    """
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "Assets"
+        waves = root / "MonoBehaviour"
+        waves.mkdir(parents=True)
+        for number in range(7):
+            (waves / f"Aftermath_Wave{number:02d}.asset").write_text(
+                "--- !u!114 &11400000\nMonoBehaviour:\n  m_Name: wave\n")
+
+        checks = diagnose_levels(root)
+        check("a small indexed set is named rather than called nothing",
+              "no single corpus" in checks[0].message, True)
+        check("and it is not promoted to a corpus verdict",
+              "DETECTED BUT UNSUPPORTED" in checks[0].message, False)
+        check("the group itself is found",
+              [e["count"] for e in corpus_candidates(root)], [7])
+
+        # Twelve or more of them is a corpus, and then the verdict changes.
+        for number in range(7, 14):
+            (waves / f"Aftermath_Wave{number:02d}.asset").write_text(
+                "--- !u!114 &11400000\nMonoBehaviour:\n  m_Name: wave\n")
+        check("past the threshold it becomes an unreadable corpus",
+              "DETECTED BUT UNSUPPORTED" in diagnose_levels(root)[0].message, True)
+
+        # The same shape in art must never read as data.
+        art = root / "Sprite"
+        art.mkdir()
+        for number in range(9):
+            (art / f"icon_{number}.asset").write_text(
+                "--- !u!213 &21300000\nSprite:\n  m_Name: icon\n")
+        check("sprites serialised as .asset are not mistaken for data",
+              [e for e in corpus_candidates(root)
+               if e["directory"].endswith("Sprite")], [])
 
 
 def outcome_checks() -> None:
@@ -668,9 +779,11 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
                                  "--- !u!23 &2300\nMeshRenderer:"))
     check("skinned renderer is marked rigged", skinned[0]["skinned"], True)
 
+    mesh_checks()
     gate_checks()
     absent_tree_checks()
     corpus_checks()
+    scriptable_corpus_checks()
     outcome_checks()
 
     for line in FAILED:
