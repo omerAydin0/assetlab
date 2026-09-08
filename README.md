@@ -341,20 +341,60 @@ reproduced.
 Across five builds: 3,548 clips, of which 384 are sprite-swap sequences and 1,955
 compose into rigs totalling 36,235 layers.
 
-### Obstacles
+### Objects
 
-The browser has a second view listing obstacles as families rather than loose sprites
-— 398 families over five builds, 10,356 pieces. Opening one shows two things:
+An object is one thing on screen, and the browser shows it three ways at once:
 
-- **Final form** — the composed rig: the object assembled with every sprite in place,
-  which no single image in the set shows. Clips are ranked so an idle or tap state is
-  preferred over an explosion, and a clip carrying a small fraction of the object's
-  art is rejected however it is named.
-- **Pieces** — the sprites that rig draws, which is by definition what the object is
-  made of. Evidence, rather than a guess about names.
+- **Final form** — the object assembled. The composed rig where the build ships a
+  clip that draws it, otherwise the sprite it ships whole. Clips are ranked so an idle
+  or tap state is preferred over an explosion, and a clip carrying a small fraction of
+  the object's art is rejected however it is named.
+- **Sprite atlas** — the sheet its sprites were packed on, with this object's own
+  cuts outlined on it. This is the one view that says which art the studio chose to
+  pack together and where the object sits among it.
+- **Pieces** — every sprite cut for the object, at its own size.
 
-Raw atlas pages are excluded from both: they are the sheet the art was cut from, and
-being the largest images in a set they would otherwise headline every card.
+Which sprites belong to which object is decided from two kinds of evidence, never
+from a list of words. The first is the artists' own naming: a part's name extends the
+whole's, so `TB_dog` owns `TB_dogEar_1`, `TB_dogNose` and `TB_dogTail`. Names are
+compared as token lists, so `coin` does not swallow `coinage`, and a chain is
+flattened to its root — a nose ball is one more piece of the dog, not an object with
+a nose ball in it. The second is the animation: where the build ships no sprite for
+the assembled thing — one build's dragon is thirteen loose limbs and no dragon — a
+clip that draws those thirteen at once has already said they are one object.
+
+Most of the work is in refusing the shapes that only look like objects, and each rule
+was written against a case a real build produced:
+
+- **A stem must be long enough to be a name.** Split at the letter/digit seam, `d1_E_c`
+  starts with the token `d`, and a build that ships the letter D as a sprite had it
+  claiming 643 unrelated sprites as its parts.
+- **A numbered run** names one thing many times — `Puzzle_Cube_01` to `_48`.
+- **A variant matrix** names a few things many times over: 225 puzzle sprites reduce to
+  thirteen kinds where twelve dog parts reduce to nine. Both tests are needed; either
+  alone lets the other case through.
+- **A whole is not smaller than its parts.** `Gem` at 57×56 does not contain
+  `gem_item_AO` at 256×256, and `Top` at 47×95 does not contain `TopBar_MainPanel`
+  at 1458×250. The art says so, without any vocabulary.
+- **A clip can depict a place instead of a thing.** Two measurements failed here before
+  one worked: a scene's pieces are no more spread out than an object's, because the
+  backdrop is one of the pieces and sets the scale, and its largest piece is not
+  reliably larger relative to its median either — a furnished room scores 19 where a
+  cocktail glass scores 14. Size is what separates them. Across six builds 1,998
+  rigged clips draw 49 distinct sprites or fewer and 20 draw more, the histogram
+  falling from 59 clips in the 40s to 4 in the 50s. A dragon is thirteen limbs; a
+  district's fountain is 338 sprites of bridge, water and lotuses across a map.
+
+Anything that is neither a whole nor a part is an object on its own, which is the
+honest answer for a row of coins.
+
+The obstacle view groups those objects by mechanic — Balloon is thirteen objects and
+85 sprites, six colours of dog and their balloons — and opening a family lists each
+object with its own pieces.
+
+This replaced a word list (*frag*, *shard*, *spark*) that split an obstacle into
+"whole" and "pieces" by vocabulary. On one build it filed 72 of Balloon's 85 sprites
+as whole objects, every one of them a limb, and left the dragon with no whole at all.
 
 ### What the browser shows
 
@@ -369,8 +409,24 @@ being the largest images in a set they would otherwise headline every card.
 
 Live search, faceted filters whose counts reflect every other active filter, a lazy
 grid, and a detail panel listing which prefabs and scenes use the asset. The header
-states the detected profile, and the models tab appears only for a build that has a
-mesh chain behind it — an empty view is worse than an absent one.
+states the detected profile.
+
+Five tabs: **assets**, **objects**, **animations**, **obstacles**, **models**. Each
+appears only when there is something behind it — a 2D build has no mesh chain, a build
+with no clips has no rigs, and an empty view is worse than an absent one. Animation
+data lives in its own tab because a clip is not a picture of anything until it is
+composed: several hundred of them in the asset grid is several hundred cards showing
+one detached layer, or nothing at all.
+
+The asset grid is ordered art first. Sorted by type alone it opened on `AnimationClip`
+and `AnimatorController` — a screen of empty placeholders — with a build's 5,000
+pictures behind 9,000 rows that have nothing to show.
+
+Thumbnails fill their frame in both directions. `Image.thumbnail` only ever shrinks,
+and most of a mobile build's sprites are far smaller than the frame: a 71×72 blocker
+occupied a tenth of a 224×224 canvas, the card scaled that canvas down again, and a
+screen of real artwork read as a screen of empty boxes. Aspect ratio is kept, so a
+1024×8 gradient strip stays a strip — it genuinely is one.
 
 ### One page for every build
 
@@ -418,6 +474,7 @@ out/<name>/
   assetlab.db        catalogue: assets, refs, tags, used_by, sprites, levels,
                      animations, piece_groups, models, bundles, meta (profile)
   sprites/           one image per sprite, cut from its atlas
+  atlas/             a fitted copy of each shared sheet, for the object view
   thumbs/  media/    grid thumbnails; audio and fonts copied for playback
   browser.html       the library, self-contained
   levels_report.md   difficulty curve, when the build ships a corpus

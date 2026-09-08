@@ -33,7 +33,9 @@ from PIL import Image
 
 from .core import connect
 
-MIRROR = ("sprites", "thumbs", "media")
+#: `atlas` holds the sheet copies the object view draws its cut outlines over;
+#: `renders` holds the drawn geometry a 3D build shows instead of sprites.
+MIRROR = ("sprites", "thumbs", "media", "atlas", "renders")
 PREVIEW_SIDE = 1024
 PREVIEW_QUALITY = 80
 # `as_uri()` percent-encodes, and that is exactly what the pages contain.

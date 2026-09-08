@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS sprites (
     asset_id    INTEGER PRIMARY KEY,
     atlas_guid  TEXT,
     x INTEGER, y INTEGER, w INTEGER, h INTEGER,
+    rotated INTEGER,   -- packed at 90 degrees: its box on the sheet is h by w
     sliced_path TEXT,
     ppu         REAL,   -- m_PixelsToUnits; 140 here, not the 100 default
     anchor_x    REAL,   -- pivot as a fraction of the sliced image, left to right
@@ -252,7 +253,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.executescript(SCHEMA)
     sprite_columns = {row[1] for row in conn.execute("PRAGMA table_info(sprites)")}
     for column, decl in (("ppu", "REAL"), ("anchor_x", "REAL"), ("anchor_y", "REAL"),
-                         ("border", "TEXT")):
+                         ("border", "TEXT"), ("rotated", "INTEGER")):
         if sprite_columns and column not in sprite_columns:
             conn.execute(f"ALTER TABLE sprites ADD COLUMN {column} {decl}")
     conn.commit()
@@ -366,9 +367,27 @@ def dhash(image: Image.Image) -> str:
     return f"{value:016x}"
 
 
+#: How far a small sprite may be blown up to fill its card. Past this the art is more
+#: blur than information, and a 12-pixel icon shown at 96 is already unmistakable.
+MAX_ENLARGE = 8
+
+
 def make_thumbnail(image: Image.Image, target: Path, size: int = 224) -> None:
+    """Fit the art to the frame, in both directions.
+
+    ``Image.thumbnail`` only ever shrinks. Most of a mobile build's sprites are far
+    smaller than the frame - a 71x73 blocker occupied a tenth of a 224x224 canvas and
+    then the card scaled that canvas down again, so a screen of real artwork read as
+    a screen of empty boxes. Aspect ratio is kept, so a 1024x8 gradient strip stays a
+    strip: it genuinely is one.
+    """
     thumb = image.copy()
-    thumb.thumbnail((size, size), Image.Resampling.LANCZOS)
+    scale = min(size / max(1, thumb.width), size / max(1, thumb.height), MAX_ENLARGE)
+    if abs(scale - 1) > 0.01:
+        wide = max(1, round(thumb.width * scale))
+        tall = max(1, round(thumb.height * scale))
+        thumb = thumb.resize((wide, tall), Image.Resampling.LANCZOS if scale < 1
+                             else Image.Resampling.BICUBIC)
     canvas = Image.new("RGBA", (size, size), (30, 32, 36, 255))
     canvas.alpha_composite(thumb, ((size - thumb.width) // 2, (size - thumb.height) // 2))
     target.parent.mkdir(parents=True, exist_ok=True)

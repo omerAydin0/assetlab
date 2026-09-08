@@ -13,8 +13,9 @@ from PIL import Image
 from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
 from .classify import (feature_from_project_dir, feature_from_container_path,
                        match_vocabulary, mechanics_from_holders)
-from .core import infer_type
+from .core import infer_type, make_thumbnail
 from .mesh import parse_mesh
+from .objects import group_objects, name_tokens
 from .models import parse_material, parse_prefab_models
 from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
 from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
@@ -509,6 +510,144 @@ def scriptable_corpus_checks() -> None:
                if e["directory"].endswith("Sprite")], [])
 
 
+def object_checks() -> None:
+    """Grouping sprites into objects, on the shapes real builds actually ship."""
+    def sprite(name, w=32, h=32, page=None, mechanic=None):
+        return {"n": name, "img": f"sprites/{name}.png", "kind": "image", "at": None,
+                "w": w, "h": h, "ax": page, "mechanic": mechanic, "feature": None}
+
+    # A whole and the parts whose names extend it, with a chain to flatten: a nose
+    # ball belongs to the dog, not to the nose.
+    dog = [sprite("blueTB_dog", 78, 80), sprite("blueTB_dogEar_1"),
+           sprite("blueTB_dogEar_2"), sprite("blueTB_dogNose"),
+           sprite("blueTB_dogNoseBall"), sprite("blueTB_dogTail"),
+           sprite("blueTB_Balloon_base", 72, 80)]
+    found = group_objects(dog, [])
+    whole = next(o for o in found if o["n"] == "blueTB_dog")
+    check("the whole owns every part below it", len(whole["p"]), 5)
+    check("a chain is flattened to its root",
+          sorted(dog[i]["n"] for i in whole["p"]),
+          ["blueTB_dogEar_1", "blueTB_dogEar_2", "blueTB_dogNose",
+           "blueTB_dogNoseBall", "blueTB_dogTail"])
+    check("an unrelated stem stays its own object",
+          [len(o["p"]) for o in found if o["n"] == "blueTB_Balloon_base"], [0])
+
+    # A numbered run of one thing is a set of variants, not a decomposition.
+    coins = [sprite("coin")] + [sprite(f"coin_{n}") for n in range(1, 10)]
+    check("a numbered run is not a decomposition",
+          max(len(o["p"]) for o in group_objects(coins, [])), 0)
+
+    # Several names, but each of them many times over: one cube in five colours
+    # across many states, not 40 pieces of one puzzle.
+    matrix = [sprite("puzzle", 147, 141)]
+    for colour in ("blue", "green", "red", "orange"):
+        for number in range(1, 11):
+            matrix.append(sprite(f"puzzle_cube_{colour}_{number:02d}"))
+    check("a variant matrix is not a decomposition",
+          max(len(o["p"]) for o in group_objects(matrix, [])), 0)
+
+    # No sprite of the assembled thing exists, so the clip that draws the pieces is
+    # what says they are one object.
+    dragon = [sprite("Dragon_body"), sprite("Dragon_head"), sprite("Dragon_wing"),
+              sprite("unrelated_button")]
+    dragon.append({"n": "idle_1_0", "img": None, "kind": "animation", "at": None,
+                   "w": None, "h": None, "ax": None, "mechanic": None, "feature": None})
+    rigged = group_objects(dragon, [(4, ["sprites/Dragon_body.png",
+                                         "sprites/Dragon_head.png",
+                                         "sprites/Dragon_wing.png"])])
+    headless = next(o for o in rigged if o["c"] == 4)
+    check("a clip defines an object the build ships no whole for",
+          (headless["w"], len(headless["p"])), (None, 3))
+    check("the headless label is the name its members share",
+          headless["n"], "Dragon")
+
+    # Where the members share no name worth printing, the clip names the thing.
+    numbered = [sprite("02"), sprite("07"), sprite("012")]
+    numbered.append({"n": "ChestOpenAnimation", "img": None, "kind": "animation",
+                     "at": None, "w": None, "h": None, "ax": None, "mechanic": None,
+                     "feature": None})
+    check("a set that shares no name takes the clip's",
+          group_objects(numbered, [(3, [d["img"] for d in numbered[:3]])])[0]["n"],
+          "ChestOpenAnimation")
+    check("a sprite the clip does not draw stays outside it",
+          all(dragon[i]["n"] != "unrelated_button" for i in headless["p"]), True)
+
+    # A clip that draws a whole room is depicting a place, not a thing.
+    room = [sprite(f"0{n}_B_prop_{n}") for n in range(9000, 9120)]
+    room.append({"n": "AreaSketchAnimation", "img": None, "kind": "animation",
+                 "at": None, "w": None, "h": None, "ax": None, "mechanic": None,
+                 "feature": None})
+    check("a clip drawing a place defines no object",
+          any(o["c"] is not None
+              for o in group_objects(room, [(120, [d["img"] for d in room[:120]])])),
+          False)
+
+    # One outlier must not drag the shared label back to the folder name.
+    leaves = [sprite("Koala-LeafAssets-Stage_2B-Stage2B_1"),
+              sprite("Koala-LeafAssets-Stage_2B-Stage2B_2"),
+              sprite("Koala-LeafAssets-Stage_2B-Stage2B_3"),
+              sprite("Koala-bush2_v02")]
+    leaves.append({"n": "Bush_2B", "img": None, "kind": "animation", "at": None,
+                   "w": None, "h": None, "ax": None, "mechanic": None, "feature": None})
+    named = group_objects(leaves, [(4, [d["img"] for d in leaves[:4]])])[0]
+    check("the label comes from most of the set, not all of it",
+          named["n"], "Koala-LeafAssets-Stage_2B-Stage2B")
+
+    # The sheet an object came from is the one holding most of its sprites.
+    pages = [sprite("gun", 40, 40, page=3), sprite("gunGrip", 8, 8, page=3),
+             sprite("gunSight", 6, 6, page=4),
+             {"n": "GamePlay", "img": "x", "kind": "image", "at": 1, "w": 512,
+              "h": 512, "ax": None, "mechanic": None, "feature": None},
+             {"n": "Other", "img": "y", "kind": "image", "at": 1, "w": 512, "h": 512,
+              "ax": None, "mechanic": None, "feature": None}]
+    check("the atlas is where most of the object sits",
+          next(o for o in group_objects(pages, []) if o["n"] == "gun")["a"], 3)
+    check("an atlas sheet is never a member of an object",
+          any(o["n"] == "GamePlay" for o in group_objects(pages, [])), False)
+
+    # A one-letter sprite is not a name that others extend.
+    letters = [sprite("D", 75, 70), sprite("d1_E_c", 40, 40),
+               sprite("d2_D_k", 40, 40), sprite("d1_B_b", 40, 40)]
+    check("a stem too short to be a name owns nothing",
+          max(len(o["p"]) for o in group_objects(letters, [])), 0)
+
+    # A whole is assembled from its parts, so it cannot be smaller than one.
+    prefix_hub = [sprite("Gem", 57, 56), sprite("gem_item_AO", 256, 256),
+                  sprite("gem_shine", 128, 128), sprite("gem_glow_ring", 200, 90)]
+    check("a whole that does not contain its parts is not their whole",
+          max(len(o["p"]) for o in group_objects(prefix_hub, [])), 0)
+
+    check("token split follows the seams an artist types",
+          name_tokens("Blocks-Balloon-blueTB_dogEar_1"),
+          ("blocks", "balloon", "blue", "tb", "dog", "ear", "1"))
+
+
+def thumbnail_checks() -> None:
+    """A thumbnail has to fill its frame, or a grid of real art reads as empty."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "t.jpg"
+        make_thumbnail(Image.new("RGBA", (24, 24), (255, 0, 0, 255)), target, 224)
+        with Image.open(target) as made:
+            check("a small sprite is enlarged, not left as a speck", made.size,
+                  (224, 224))
+        # Measured away from the centre: a 24x24 sprite left at 1:1 still covers the
+        # middle pixel, so only a point outside that square tells the two apart.
+        # 24 px enlarged eight times covers 192 of the 224, reaching well past it.
+        with Image.open(target) as made:
+            off_centre = made.convert("RGB").getpixel((40, 112))
+        check("the art reaches past where a 1:1 paste would end",
+              off_centre[0] > 200, True)
+
+        wide = Path(tmp) / "w.jpg"
+        make_thumbnail(Image.new("RGBA", (1024, 8), (0, 255, 0, 255)), wide, 224)
+        with Image.open(wide) as made:
+            check("a strip is not stretched into a square",
+                  made.convert("RGB").getpixel((112, 112))[1] > 200, True)
+        with Image.open(wide) as made:
+            check("and keeps its proportions",
+                  made.convert("RGB").getpixel((112, 40))[1] > 200, False)
+
+
 def outcome_checks() -> None:
     """The vocabulary ratio, and the small build it must not accuse."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -784,6 +923,8 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     absent_tree_checks()
     corpus_checks()
     scriptable_corpus_checks()
+    object_checks()
+    thumbnail_checks()
     outcome_checks()
 
     for line in FAILED:

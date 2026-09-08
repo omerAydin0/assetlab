@@ -184,6 +184,7 @@ def slice_all(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dic
                 sprite_rows.append({
                     "asset_id": asset_id, "atlas_guid": guid,
                     "x": x, "y": y, "w": w, "h": h,
+                    "rotated": 1 if rotation == ROTATION_90 else 0,
                     "sliced_path": cached[asset_id],
                     "ppu": ppu, "anchor_x": pivot[0], "anchor_y": pivot[1],
                     "border": json.dumps(border) if any(border) else None,
@@ -222,6 +223,7 @@ def slice_all(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dic
             sprite_rows.append({
                 "asset_id": asset_id, "atlas_guid": guid,
                 "x": x, "y": y, "w": w, "h": h,
+                "rotated": 1 if rotation == ROTATION_90 else 0,
                 "sliced_path": f"sprites/{target.name}",
                 "ppu": ppu, "anchor_x": pivot[0], "anchor_y": pivot[1],
                 "border": json.dumps(border) if any(border) else None,
@@ -240,9 +242,9 @@ def slice_all(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dic
     )
     conn.executemany(
         """INSERT OR REPLACE INTO sprites
-             (asset_id, atlas_guid, x, y, w, h, sliced_path, ppu, anchor_x, anchor_y,
-              border)
-           VALUES (:asset_id, :atlas_guid, :x, :y, :w, :h, :sliced_path,
+             (asset_id, atlas_guid, x, y, w, h, rotated, sliced_path, ppu,
+              anchor_x, anchor_y, border)
+           VALUES (:asset_id, :atlas_guid, :x, :y, :w, :h, :rotated, :sliced_path,
                    :ppu, :anchor_x, :anchor_y, :border)""",
         sprite_rows,
     )

@@ -16,7 +16,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+from .browser import SHARED_VIEWS
 from .core import connect
+from .objects import group_objects
 
 MEDIA_KINDS = {"image", "audio", "animation", "font"}
 
@@ -141,6 +143,25 @@ aside.wide{width:min(900px,96vw)}
 .partstrip img{display:block;width:auto;max-width:102px;max-height:84px;background:none;
  border-radius:0;object-fit:contain;margin:0 auto}
 .partstrip figcaption{color:var(--dim);font-size:10px;margin-top:3px;word-break:break-all}
+.objcard .objshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ align-items:center;gap:5px;padding:5px;overflow:hidden}
+.objcard .objshots .hero{max-width:58%;max-height:100%;width:auto;height:auto;
+ object-fit:contain;background:none;border-radius:0}
+.objcard .objbits{display:flex;flex-wrap:wrap;gap:3px;align-items:center;
+ justify-content:center;flex:1;max-height:100%;overflow:hidden}
+.objcard .objbits img{width:auto;height:auto;max-width:44px;max-height:34px;
+ object-fit:contain;background:none;border-radius:0}
+.atlas{position:relative;display:inline-block;max-width:100%;line-height:0;
+ background:#0e1014;border-radius:8px}
+.atlas img{display:block;width:auto;max-width:100%;max-height:420px;background:none;
+ border-radius:8px}
+.atlas i{position:absolute;border:2px solid var(--accent);border-radius:2px;
+ box-shadow:0 0 7px 2px #6cb6ffcc,0 0 0 1px #000a inset;pointer-events:none}
+.objblock{border:1px solid var(--line);border-radius:8px;padding:10px;margin:0 0 10px;
+ cursor:pointer}
+.objblock:hover{border-color:var(--accent)}
+.objblockhead{display:flex;align-items:baseline;gap:10px;margin:0 0 8px}
+.objblockhead small{color:var(--dim);font-size:11px}
 </style></head><body>
 <header>
   <h1><span>AssetLab <span style="color:var(--dim);font-weight:400">— all games</span></span>
@@ -148,6 +169,8 @@ aside.wide{width:min(900px,96vw)}
   <div class="games" id="games"></div>
   <div class="controls">
     <span class="vtabs"><button class="vtab on" data-view="assets">assets</button><button
+      class="vtab" data-view="objects" id="objectstab">objects</button><button
+      class="vtab" data-view="animations" id="animtab">animations</button><button
       class="vtab" data-view="obstacles">obstacles</button><button
       class="vtab" data-view="models" id="modelstab">models</button></span>
     <input type="search" id="q" placeholder="search name / path…">
@@ -160,6 +183,7 @@ aside.wide{width:min(900px,96vw)}
     </select>
     <label class="chk"><input type="checkbox" id="obst"> obstacles only</label>
     <label class="chk"><input type="checkbox" id="atlas" checked> hide atlas sheets</label>
+    <label class="chk"><input type="checkbox" id="eng" checked> hide engine assets</label>
     <span id="count"></span>
   </div>
 </header>
@@ -169,7 +193,13 @@ aside.wide{width:min(900px,96vw)}
 const DATA = __DATA__, GAMES = __GAMES__;
 const F = ["role","feature","mechanic","type"];
 const el = id => document.getElementById(id);
-DATA.forEach((d, i) => { d._i = i; });
+// _r is an asset's rank within its own build. The point of holding eight builds on
+// one page is comparison, so the grid deals them out round-robin on it: the first
+// screen is every build's leading art rather than whichever build sorts first, which
+// on this catalogue meant six pages of one game's editor gizmos.
+const RANK = new Map();
+DATA.forEach((d, i) => { d._i = i;
+  const seen = RANK.get(d.g) || 0; d._r = seen; RANK.set(d.g, seen + 1); });
 
 // Each build carries the verdict of its own profile stage, so a thin-looking
 // catalogue can be read as "this one is 3D" rather than as a broken import.
@@ -189,8 +219,16 @@ let games = activeGames();
 
 function passes(d, skipKey){
   if (!games.has(d.g)) return false;
+  // Clips have a tab of their own; leaving them in the asset grid as well buries the
+  // art behind cards that are not pictures of anything.
+  if (VIEW === "assets" && isClip(d)) return false;
+  if (VIEW === "animations" && !isClip(d)) return false;
   // An atlas sheet is the page its sprites were cut from, not a piece of art.
   if (el("atlas").checked && d.at) return false;
+  // Unity and its packages ship art of their own - editor gizmos, handle outlines,
+  // dither tables - which lands in the same folders as the studio's and sorts to the
+  // front because it is tiny. It stays in the catalogue, just not in the way.
+  if (el("eng").checked && d.eng) return false;
   if (el("obst").checked && !d.obstacle) return false;
   for (const k of F) { if (k === skipKey) continue;
                        const v = el(k).value; if (v && d[k] !== v) return false; }
@@ -638,9 +676,11 @@ function modelPanel(model){
         <dt>path</dt><dd>${model.path || "(root)"}</dd></dl>`;
 }
 
-// ---- obstacle view --------------------------------------------------------
+// ---- obstacle grouping ----------------------------------------------------
 // The design enums name each blocker, so its art is exactly the tagged assets that
 // carry that name; grouping on it is what turns 800 loose sprites into ~40 obstacles.
+// Only the key differs between this page and the other, so only the key lives here -
+// everything drawn from it comes from SHARED_VIEWS below.
 let VIEW = "assets";
 function familyKey(d){ return (GAMEBADGE[d.g] + " · " + (d.mechanic || d.feature || "unlabelled")); }
 function families(){
@@ -654,111 +694,10 @@ function families(){
   for (const list of groups.values()) list.sort((a, b) => a.n.localeCompare(b.n));
   return [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
 }
-// Fragments, sparks and shadows are what an obstacle is built from and what it
-// leaves behind; the rest is what sits on the board. Splitting on the words the
-// artists themselves used beats any size threshold - a big blast sprite is not the
-// obstacle and a small goal icon is.
-const PIECE_WORDS = new Set(["part","parts","piece","pieces","frag","fragment",
-  "fragments","debris","shard","shards","chunk","particle","particles","blast",
-  "glow","spark","sparkle","sparkles","additive","add","fx","vfx","smoke","dust",
-  "trail","flash","shadow","crack","cracked","broken","explode","explosion","dot",
-  "ray","rays","confetti","splash","splinter","dirt","puff","burst","mask"]);
-function wordsOf(text){
-  return (text || "").split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)
-                     .filter(Boolean).map(w => w.toLowerCase());
-}
-function isPiece(d){
-  if (d.sub === "Particle") return true;
-  return wordsOf(d.n).concat(wordsOf(d.p)).some(w => PIECE_WORDS.has(w));
-}
-// The composed animation is the obstacle actually assembled - every sprite in place,
-// which no single image in the set shows. Which clip matters: the obstacle at rest on
-// the board, not mid-explosion, so clips are ranked by what they depict.
-const CLIP_RANK = [/idle|loop/i, /tap|click|touch|press/i,
-                   /appear|spawn|intro|create|enter/i, /hit|damage|shake|bounce/i];
-function clipRank(name){
-  const found = CLIP_RANK.findIndex(re => re.test(name));
-  if (found >= 0) return found;
-  return /explode|destroy|die|death|collect|disappear|leave|exit|end|win|fail/i
-    .test(name) ? 9 : 5;
-}
-function familyRig(parts){
-  const game = parts[0].g, mechanic = parts[0].mechanic;
-  const clips = DATA.filter(d => d.layers && d.layers.length
-                                 && d.mechanic === mechanic && d.g === game);
-  if (!clips.length) return null;
-  // A clip named "idle" is the obstacle at rest, but some builds ship idle variants
-  // that animate one detached part. A clip carrying a small fraction of the art the
-  // obstacle has is not a picture of the obstacle, whatever it is called.
-  const most = Math.max(...clips.map(d => d.layers.length));
-  const usable = clips.filter(d => d.layers.length >= most * 0.4);
-  return usable.reduce((a, b) => {
-    const ra = clipRank(a.n), rb = clipRank(b.n);
-    return rb < ra || (rb === ra && b.layers.length > a.layers.length) ? b : a;
-  });
-}
-function splitFamily(parts){
-  // The rig is the obstacle assembled, so the sprites it draws are by definition the
-  // pieces it is made of. That beats guessing from names, which reads a shopping
-  // cart's wheel and its body as equally whole.
-  const rig = familyRig(parts);
-  const drawn = new Set(rig ? rig.layers.map(layer => layer.img) : []);
-  const whole = [], pieces = [], seen = new Set();
-  // A raw atlas sheet is not artwork - it is the page the artwork was cut from,
-  // and being the largest image in the set it would headline every card.
-  for (const d of parts.filter(d => !d.at)){
-    seen.add(d._i);
-    ((drawn.has(d.img) || isPiece(d)) ? pieces : whole).push(d);
-  }
-  // Sometimes the classifier files the rig's art under a neighbouring name and this
-  // family keeps none of it. The rig is still the authority on what the obstacle is
-  // made of, so the sprites it draws are fetched back.
-  if (drawn.size && !pieces.some(d => drawn.has(d.img)))
-    for (const d of DATA)
-      if (d.img && drawn.has(d.img) && !seen.has(d._i)) pieces.push(d);
-  const bySize = (a, b) => (b.w||0)*(b.h||0) - (a.w||0)*(a.h||0);
-  return [whole.sort(bySize), pieces.sort(bySize)];
-}
-function familyCard(name, parts, i){
-  const [whole, pieces] = splitFamily(parts);
-  const shots = (whole.length ? whole : pieces).slice(0, 4)
-    .map(p => `<img loading="lazy" src="${p.t || p.img}">`).join("");
-  const total = whole.length + pieces.length;
-  return `<div class="card famcard" data-fam="${i}"><div class="famshots">${shots}</div>
-          <b>${name}</b>
-          <s>${whole.length} whole · ${pieces.length} piece${pieces.length === 1 ? "" : "s"}</s>
-          </div>`;
-}
-function strip(list){
-  return `<div class="partstrip">` + list.map(d =>
-    `<figure><img src="${d.img}" title="${d.n}">
-     <figcaption>${d.n}<br>${d.w||"?"}×${d.h||"?"}</figcaption></figure>`).join("")
-    + `</div>`;
-}
-function familyPanel(name, parts){
-  const [whole, pieces] = splitFamily(parts);
-  const rig = familyRig(parts);
-  const assembled = rig
-    ? `${rigStage(rig)}
-       <div style="display:flex;gap:8px;align-items:center;margin:6px 0 4px">
-         <button class="close" onclick="playRig(DATA[${rig._i}].layers, DATA[${rig._i}].nodes,
-           DATA[${rig._i}].clipdur, DATA[${rig._i}].masks)">play</button>
-         <button class="close" onclick="stopClip()">stop</button>
-         <small id="clippos">${rig.layers.length} layers · ${
-           (rig.clipdur ?? 0).toFixed(2)}s · ${rig.n}</small></div>`
-    : `<p style="color:var(--dim);font-size:13px;margin:4px 0">This one ships no rigged
-       clip, so there is no assembled view — only the art below.</p>`;
-  return `<button class="close"
-      onclick="stopClip();document.getElementById('panel').classList.remove('open')">close</button>
-    <h2>${name}</h2>
-    <h3>final form <span>the obstacle as it sits on the board</span></h3>
-    ${assembled}
-    ${whole.length ? strip(whole) : ""}
-    ${pieces.length ? `<h3>pieces <span>${pieces.length} sprite${
-        pieces.length === 1 ? "" : "s"} it is built from, plus its effects</span></h3>`
-      + strip(pieces) : ""}`;
-}
-let FAMILIES = [];
+__SHARED_VIEWS__let FAMILIES = [], PAGED = "asset";
+// Three of the five views scroll a flat list, and only the card differs.
+const CARD = {asset: d => card(d, d._i), animation: clipCard, object: objectCard};
+const COUNTED = {asset: "assets", animation: "clips", object: "objects"};
 function render(reset){
   if (!reset) { if (VIEW === "obstacles") return; }
   else {
@@ -800,15 +739,32 @@ function render(reset){
         `${assembled.length} assembled`;
       return;
     }
-    filtered = DATA.filter(match);
+    if (VIEW === "objects"){
+      PAGED = "object";
+      // Most objects are one sprite that owns nothing, which the assets tab already
+      // shows. What this tab is for is the ones that come apart, so they lead - and
+      // ranking across builds rather than within each keeps the comparison.
+      filtered = OBJECTS.map((o, i) => [o, i]).filter(([o]) => objVisible(o))
+        .sort((a, b) => b[0].p.length - a[0].p.length ||
+              (b[0].c != null) - (a[0].c != null) || a[0].n.localeCompare(b[0].n));
+    } else if (VIEW === "animations"){
+      PAGED = "animation";
+      filtered = DATA.filter(match).sort((a, b) =>
+        (b.layers ? b.layers.length : b.fr ? 1 : 0) -
+        (a.layers ? a.layers.length : a.fr ? 1 : 0) || a.n.localeCompare(b.n));
+    } else {
+      PAGED = "asset";
+      filtered = DATA.filter(match)
+                    .sort((a, b) => a._r - b._r || a.g.localeCompare(b.g));
+    }
   }
   const slice = filtered.slice(shown, shown+300);
-  el("grid").insertAdjacentHTML("beforeend", slice.map(d => card(d, d._i)).join(""));
+  el("grid").insertAdjacentHTML("beforeend", slice.map(CARD[PAGED]).join(""));
   shown += slice.length;
-  el("count").textContent = `${filtered.length.toLocaleString()} assets` +
+  el("count").textContent = `${filtered.length.toLocaleString()} ${COUNTED[PAGED]}` +
     (shown < filtered.length ? ` (showing ${shown})` : "");
 }
-["q","role","feature","mechanic","type","size","obst","atlas"].forEach(id =>
+["q","role","feature","mechanic","type","size","obst","atlas","eng"].forEach(id =>
   el(id).addEventListener(id === "q" ? "input" : "change", () => render(true)));
 document.querySelectorAll(".gamebox").forEach(box =>
   box.addEventListener("change", () => {
@@ -845,6 +801,8 @@ el("grid").addEventListener("click", e => {
     panel.classList.add("open");
     return;
   }
+  const object = e.target.closest("[data-obj]");
+  if (object){ openObject(+object.dataset.obj); return; }
   const group = e.target.closest("[data-fam]");
   if (group){
     stopClip();
@@ -871,14 +829,27 @@ el("grid").addEventListener("click", e => {
   panel.classList.add("open");
 });
 // The tab exists only when a selected build has a mesh chain behind it.
-function syncModelsTab(){
-  const any = MODELS.some(m => games.has(m.g)) || SCENES.some(s => games.has(s.g));
-  el("modelstab").style.display = any ? "" : "none";
-  if (!any && VIEW === "models"){
+// The panel is outside the grid, so the object blocks inside a family need their
+// own listener.
+el("panel").addEventListener("click", e => {
+  const block = e.target.closest("[data-obj]");
+  if (block) openObject(+block.dataset.obj);
+});
+// A tab only exists while the ticked games have something behind it, and a view that
+// empties under the tick boxes hands the page back to the assets grid.
+function showTab(id, any){
+  el(id).style.display = any ? "" : "none";
+  if (!any && VIEW === el(id).dataset.view){
     VIEW = "assets";
     document.querySelectorAll(".vtab").forEach(b =>
       b.classList.toggle("on", b.dataset.view === "assets"));
   }
+}
+function syncModelsTab(){
+  showTab("modelstab",
+          MODELS.some(m => games.has(m.g)) || SCENES.some(s => games.has(s.g)));
+  showTab("objectstab", OBJECTS.some(o => objMembers(o).some(d => games.has(d.g))));
+  showTab("animtab", DATA.some(d => games.has(d.g) && isClip(d)));
 }
 syncModelsTab();
 render(true);
@@ -898,8 +869,18 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
         "SELECT asset_id FROM tags WHERE kind='category' AND value='Obstacle'")}
     # The pages sprites were cut from. They are the largest images in the catalogue,
     # so an obstacle set that keeps them shows its atlas sheet instead of its art.
-    atlas_pages = {row[0] for row in conn.execute(
-        "SELECT DISTINCT atlas_guid FROM sprites WHERE atlas_guid IS NOT NULL")}
+    atlas_pages: set[str] = set()
+    packed: dict[str, int] = {}
+    sprite_rect: dict[int, tuple] = {}
+    rect_columns = {row[1] for row in conn.execute("PRAGMA table_info(sprites)")}
+    rotated = "rotated" if "rotated" in rect_columns else "0 AS rotated"
+    for row in conn.execute(
+        f"SELECT asset_id, atlas_guid, x, y, w, h, {rotated} FROM sprites "
+        "WHERE atlas_guid IS NOT NULL"):
+        atlas_pages.add(row["atlas_guid"])
+        packed[row["atlas_guid"]] = packed.get(row["atlas_guid"], 0) + 1
+        sprite_rect[row["asset_id"]] = (row["atlas_guid"], row["x"], row["y"],
+                                        row["w"], row["h"], row["rotated"] or 0)
     clips: dict[int, dict] = {}
     try:
         for row in conn.execute(
@@ -932,11 +913,15 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
         pass
 
     records = []
+    row_guid: list[str | None] = []
+    row_id: list[int] = []
+    # Art first: sorted by type alone the grid opens on rows that have no picture.
     for row in conn.execute(
         """SELECT id, guid, name, rel_path, unity_type, ext, width, height, image_path,
                   primary_role, primary_feature, primary_mechanic,
-                  duration_seconds, thumbnail
-             FROM assets ORDER BY unity_type, name"""):
+                  duration_seconds, thumbnail, origin
+             FROM assets
+            ORDER BY (image_path IS NULL), unity_type, name"""):
         ext = (row["ext"] or "").lower()
         clip = clips.get(row["id"])
         if row["image_path"]:
@@ -959,6 +944,8 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
             "role": row["primary_role"], "feature": row["primary_feature"],
             "mechanic": row["primary_mechanic"], "obstacle": row["id"] in obstacles,
             "at": 1 if row["guid"] in atlas_pages else None,
+            "ac": packed.get(row["guid"]),
+            "eng": 1 if row["origin"] == "engine" else None,
             "pg": piece_sets.get(piece_key.get(row["id"])),
             "t": f"{prefix}thumbs/{row['id']}.jpg" if thumb.is_file() else None,
         }
@@ -980,6 +967,31 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
             record["masks"] = clip["masks"]
             record["clipdur"] = clip["dur"]
         records.append(record)
+        row_guid.append(row["guid"])
+        row_id.append(row["id"])
+
+    # Where each sprite was cut from, and the copy of that sheet the per-game build
+    # left beside its catalogue. The full texture is a file:// path the hub cannot
+    # reach, and the square thumbnail beside it is padded, so outlines drawn over it
+    # would land in the wrong place - without the copy the sheet is simply not shown.
+    place_of_guid = {guid: position for position, guid in enumerate(row_guid) if guid}
+    for position, asset_id in enumerate(row_id):
+        rect = sprite_rect.get(asset_id)
+        page = place_of_guid.get(rect[0]) if rect else None
+        if page is None:
+            continue
+        records[position]["ax"] = page
+        records[position]["r"] = list(rect[1:])
+    for position, guid in enumerate(row_guid):
+        if not packed.get(guid) or packed[guid] < 2:
+            continue
+        if (out_dir / name / "atlas" / f"{row_id[position]}.jpg").is_file():
+            records[position]["sheet"] = f"{prefix}atlas/{row_id[position]}.jpg"
+
+    objects = group_objects(records, [
+        (position, [layer["img"] for layer in record["layers"]])
+        for position, record in enumerate(records) if record.get("layers")])
+
     # The mesh chain, for a build that has one. Texture paths get the same game
     # prefix as sprites, so a model's surface loads from that build's folder.
     models: list[dict] = []
@@ -1035,17 +1047,33 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
 
     conn.close()
     return records, {"id": name, "title": name, "short": name,
-                     "count": len(records), "profile": profile}, models, scenes
+                     "count": len(records), "profile": profile}, models, scenes, objects
 
 
 def build(out_dir: Path, names: list[str]) -> dict:
-    data, games, models, scenes = [], [], [], []
+    data, games, models, scenes, objects = [], [], [], [], []
     for name in names:
         result = collect(out_dir, name)
         if result is None:
             print(f"  skipped {name}: no catalogue")
             continue
-        records, meta, found, assembled = result
+        records, meta, found, assembled, grouped = result
+        # Each build is grouped on its own - two games that ship a sprite by the same
+        # name are not one object - so the indices arrive local and are shifted onto
+        # the combined list here.
+        base = len(data)
+        # Every index into DATA is shifted, the sheet an individual sprite points at
+        # included - the object view compares the two to know which cuts belong on
+        # the page it is drawing, and one of them left unshifted matches nothing.
+        for record in records:
+            if record.get("ax") is not None:
+                record["ax"] += base
+        for entry in grouped:
+            entry["w"] = None if entry["w"] is None else entry["w"] + base
+            entry["p"] = [index + base for index in entry["p"]]
+            entry["c"] = None if entry["c"] is None else entry["c"] + base
+            entry["a"] = None if entry["a"] is None else entry["a"] + base
+        objects.extend(grouped)
         data.extend(records)
         games.append(meta)
         models.extend(found)
@@ -1055,7 +1083,10 @@ def build(out_dir: Path, names: list[str]) -> dict:
         print(f"  {name:<14} {len(records):>7} previewable assets  [{verdict}]{extra}")
 
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-    page = (PAGE.replace("__DATA__", payload)
+    page = (PAGE.replace("__SHARED_VIEWS__", SHARED_VIEWS)
+                .replace("__DATA__", payload)
+                .replace("__OBJECTS__", json.dumps(objects, ensure_ascii=False,
+                                                   separators=(",", ":")))
                 .replace("__MODELS__", json.dumps(models, ensure_ascii=False,
                                                   separators=(",", ":")))
                 .replace("__SCENES__", json.dumps(scenes, ensure_ascii=False,
@@ -1064,7 +1095,7 @@ def build(out_dir: Path, names: list[str]) -> dict:
     target = out_dir / "hub.html"
     target.write_text(page, encoding="utf-8")
     return {"games": len(games), "assets": len(data), "models": len(models),
-            "bytes": len(page), "path": target}
+            "objects": len(objects), "bytes": len(page), "path": target}
 
 
 def main() -> None:
