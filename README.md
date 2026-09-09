@@ -410,7 +410,14 @@ honest answer for a row of coins.
 
 The obstacle view groups those objects by mechanic — Balloon is thirteen objects and
 85 sprites, six colours of dog and their balloons — and opening a family lists each
-object with its own pieces.
+object with its own pieces, then the loose art under a heading of its own.
+
+That separation matters more than it sounds. A mechanic's vocabulary is mostly art
+that belongs to nothing: one build tags 201 sprites `Items`, and 127 of them are
+single sprites — twelve numbered snowballs and a blurred copy of each. Listing those
+as 127 objects, every one with its own heading above a strip holding a single picture,
+buried the fourteen things that actually come apart and read as a pile of unrelated
+art, because that is what it was.
 
 This replaced a word list (*frag*, *shard*, *spark*) that split an obstacle into
 "whole" and "pieces" by vocabulary. On one build it filed 72 of Balloon's 85 sprites
@@ -465,6 +472,21 @@ seconds to load, so cross-build comparison is one click.
 vocabulary a build's scripts do not spell out. It is optional and additive: rules
 never invent a classification, they only adjust what the evidence produced.
 `rules/example.json` documents the shape.
+
+### Testing the part that runs in the browser
+
+The rig runs on the page, so `selftest.py` cannot reach it. The checks in
+`assetlab/jstest.py` paste the page's own shared blocks into a fixture page and run it
+in headless Edge, which ships with Windows; Chrome works too, and `CHROME` points at
+either. No JavaScript runtime is installed and none is required.
+
+```bash
+python -m assetlab.jstest
+```
+
+Where no browser is found the checks report **skipped**, not passed. This gap was not
+theoretical: a one-line fix to `layerStyle` landed in one page and not the other, and
+only a measurement on a real build caught it.
 
 ## Using it on another build
 

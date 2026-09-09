@@ -629,17 +629,24 @@ function familyObjects(parts){
     const i = OBJ_OF.get(d._i);
     if (i !== undefined && !seen.has(i)){ seen.add(i); found.push([OBJECTS[i], i]); }
   }
-  return found.sort((a, b) => b[0].p.length - a[0].p.length ||
-                              a[0].n.localeCompare(b[0].n));
+  found.sort((a, b) => b[0].p.length - a[0].p.length || a[0].n.localeCompare(b[0].n));
+  // A mechanic's vocabulary is mostly loose art. One build tags 201 sprites `Items`
+  // and 126 of them belong to nothing - twelve numbered snowballs and a blurred copy
+  // of each. Listing those as 126 objects, every one with its own heading above a
+  // strip holding a single picture, buries the fifteen things that actually come
+  // apart and reads as a pile of unrelated art, which is what it is.
+  const sets = found.filter(([o]) => objMembers(o).length > 1);
+  const loose = found.filter(([o]) => objMembers(o).length === 1)
+                     .map(([o]) => objMembers(o)[0]);
+  return {sets, loose};
 }
 function familyCard(name, parts, i){
-  const found = familyObjects(parts);
-  const shots = found.slice(0, 4).map(([o]) => {
-    const hero = objHero(o);
-    return hero ? `<img loading="lazy" src="${hero.t || hero.img}">` : "";
-  }).join("");
+  const {sets, loose} = familyObjects(parts);
+  const shots = (sets.length ? sets.map(([o]) => objHero(o)) : loose)
+    .slice(0, 4).filter(Boolean)
+    .map(hero => `<img loading="lazy" src="${hero.t || hero.img}">`).join("");
   return `<div class="card famcard" data-fam="${i}"><div class="famshots">${shots}</div>
-          <b>${name}</b><s>${found.length} object${found.length === 1 ? "" : "s"}
+          <b>${name}</b><s>${sets.length} object${sets.length === 1 ? "" : "s"}
           · ${parts.length} sprites</s></div>`;
 }
 function strip(list){
@@ -649,18 +656,19 @@ function strip(list){
     + `</div>`;
 }
 function familyPanel(name, parts){
-  const found = familyObjects(parts);
+  const {sets, loose} = familyObjects(parts);
+  const mechanic = name.split(" · ").pop();
   const rig = familyRig(parts);
   if (rig && rig.layers) wakeRig(rig);
   const assembled = rig
     ? rigStage(rig) + clipControls(rig)
     : `<p style="color:var(--dim);font-size:13px;margin:4px 0">This one ships no rigged
        clip, so there is no assembled view — only the art below.</p>`;
-  const blocks = found.map(([o, i]) => {
+  const blocks = sets.map(([o, i]) => {
     const members = objMembers(o);
     return `<div class="objblock" data-obj="${i}">
-      <div class="objblockhead"><b>${o.n}</b><small>${members.length} sprite${
-        members.length === 1 ? "" : "s"}${o.w != null ? ", shipped whole" : ", pieces only"}${
+      <div class="objblockhead"><b>${o.n}</b><small>${members.length} sprites${
+        o.w != null ? ", shipped whole" : ", pieces only"}${
         o.c != null ? ", animated" : ""} — click for its atlas</small></div>
       ${strip(members)}</div>`;
   }).join("");
@@ -669,9 +677,10 @@ function familyPanel(name, parts){
     <h2>${name}</h2>
     <h3>final form <span>the obstacle as it sits on the board</span></h3>
     ${assembled}
-    <h3>objects <span>${found.length} in this set, ${parts.length} sprites tagged
-      ${name}</span></h3>
-    ${blocks}`;
+    ${sets.length ? `<h3>objects <span>${sets.length} that come apart, of ${
+        parts.length} sprites tagged ${mechanic}</span></h3>${blocks}` : ""}
+    ${loose.length ? `<h3>loose sprites <span>${loose.length} tagged ${mechanic},
+        belonging to no object here</span></h3>${strip(loose)}` : ""}`;
 }
 """
 

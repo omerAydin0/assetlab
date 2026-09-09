@@ -617,6 +617,13 @@ def object_checks() -> None:
     check("a whole that does not contain its parts is not their whole",
           max(len(o["p"]) for o in group_objects(prefix_hub, [])), 0)
 
+    # Every part the same size as the whole: copies of it, not pieces of it.
+    swatches = [sprite("1x1_white", 1, 1)] + [
+        sprite(f"1x1_white_{tail}", 1, 1)
+        for tail in ("0", "150", "bundled", "no_atlas", "resources")]
+    check("parts that are all the size of the whole are copies of it",
+          max(len(o["p"]) for o in group_objects(swatches, [])), 0)
+
     check("token split follows the seams an artist types",
           name_tokens("Blocks-Balloon-blueTB_dogEar_1"),
           ("blocks", "balloon", "blue", "tb", "dog", "ear", "1"))
@@ -933,7 +940,19 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
 
     from .ingest.selftest import main as ingest_main
     ingest_failed = ingest_main()
-    raise SystemExit(1 if (FAILED or ingest_failed) else 0)
+
+    # The page's own JavaScript, run in a browser. Reported separately because it can
+    # be skipped for want of one, and a skipped check must not read as a passing one.
+    from .jstest import run as run_browser_checks
+    browser = run_browser_checks()
+    for line in browser["failed"]:
+        print("FAIL", line)
+    if browser["skipped"]:
+        print(f"browser: SKIPPED - {browser['skipped']}")
+    else:
+        print(f"browser: {browser['passed']} passed, "
+              f"{len(browser['failed'])} failed")
+    raise SystemExit(1 if (FAILED or ingest_failed or browser["failed"]) else 0)
 
 
 if __name__ == "__main__":

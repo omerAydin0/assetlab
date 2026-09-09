@@ -28,9 +28,11 @@ each rule below was written against a case a real build produced:
   members must reduce to more than one kind.
 * A variant matrix names a few things many times over. 225 puzzle sprites reduce to
   thirteen kinds; twelve dog parts reduce to nine. Real parts appear about once each.
-* A whole is assembled from its parts, so it is not smaller than any of them. `Gem`
-  at 57x56 does not contain `gem_item_AO` at 256x256, and `Top` at 47x95 does not
-  contain `TopBar_MainPanel` at 1458x250. The art says so; no vocabulary is involved.
+* A whole is assembled from its parts, so it is not smaller than any of them, and
+  something is cut out of it - at least one part smaller than the whole. `Gem` at
+  57x56 does not contain `gem_item_AO` at 256x256; `1x1_white` owns twenty-one other
+  one-pixel swatches, and a pixel cannot be cut into twenty-one pieces. The art says
+  so; no vocabulary is involved.
 """
 from __future__ import annotations
 
@@ -181,6 +183,13 @@ def group_objects(records: list[dict], rigs: list[tuple[int, list[str]]]) -> lis
         # art does.
         whole = area(owner)
         if whole and any(area(index) > whole for index in children[owner]):
+            del children[owner]
+            continue
+        # And something is cut out of it: at least one part smaller than the whole.
+        # Where every part is exactly the size of the whole they are copies of it and
+        # not pieces of it - one build's `1x1_white` owns twenty-one other one-pixel
+        # swatches, and a pixel cannot be cut into twenty-one pieces.
+        if whole and not any(area(index) < whole for index in children[owner]):
             del children[owner]
 
     objects: list[dict] = []
