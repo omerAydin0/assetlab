@@ -699,6 +699,9 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
             "at": 1 if row["guid"] in atlas_pages else None,
             "ac": packed.get(row["guid"]),
             "eng": 1 if row["origin"] == "engine" else None,
+            # Everything in one atlas descriptor is one skeleton's art; the build said
+            # so itself when it wrote them into the same file.
+            "set": row["rel_path"].split("#")[0] if "#" in row["rel_path"] else None,
             "pg": piece_sets.get(piece_key.get(row["id"])),
             "t": f"{prefix}thumbs/{row['id']}.jpg" if thumb.is_file() else None,
         }

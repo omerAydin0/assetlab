@@ -204,7 +204,9 @@ Analysis, in the order `run.py` executes them:
 | 8 | `browser.py` | thumbnails, media previews and a self-contained filterable browser |
 
 `levels` runs before `classify` on purpose: the obstacle names it finds are what let
-classification label obstacle art.
+classification label obstacle art. `spine` runs after `slice`, so a region can point at
+a page the catalogue already holds, and before `classify`, so the art it recovers is
+labelled with the rest.
 
 `hub.py` builds one page holding every catalogue at once.
 `publish.py` assembles a portable copy for another machine.
@@ -386,14 +388,21 @@ An object is one thing on screen, and the browser shows it three ways at once:
   pack together and where the object sits among it.
 - **Pieces** — every sprite cut for the object, at its own size.
 
-Which sprites belong to which object is decided from two kinds of evidence, never
-from a list of words. The first is the artists' own naming: a part's name extends the
-whole's, so `TB_dog` owns `TB_dogEar_1`, `TB_dogNose` and `TB_dogTail`. Names are
-compared as token lists, so `coin` does not swallow `coinage`, and a chain is
-flattened to its root — a nose ball is one more piece of the dog, not an object with
-a nose ball in it. The second is the animation: where the build ships no sprite for
-the assembled thing — one build's dragon is thirteen loose limbs and no dragon — a
-clip that draws those thirteen at once has already said they are one object.
+Which sprites belong to which object is decided from three kinds of evidence, never
+from a list of words.
+
+The first is anything the build states outright. A Spine atlas descriptor holds one
+skeleton's art and nothing else, so its regions are one object however they are named
+— and they are named `01_Alt` and `01_02`, which no reading of names could group.
+
+The second is the artists' own naming: a part's name extends the whole's, so `TB_dog`
+owns `TB_dogEar_1`, `TB_dogNose` and `TB_dogTail`. Names are compared as token lists,
+so `coin` does not swallow `coinage`, and a chain is flattened to its root — a nose
+ball is one more piece of the dog, not an object with a nose ball in it.
+
+The third is the animation: where the build ships no sprite for the assembled thing
+— one build's dragon is thirteen loose limbs and no dragon — a clip that draws those
+thirteen at once has already said they are one object.
 
 Most of the work is in refusing the shapes that only look like objects, and each rule
 was written against a case a real build produced:
@@ -484,6 +493,47 @@ seconds to load, so cross-build comparison is one click.
 vocabulary a build's scripts do not spell out. It is optional and additive: rules
 never invent a classification, they only adjust what the evidence produced.
 `rules/example.json` documents the shape.
+
+### Art Unity's own sprite records never see
+
+A build that animates with Spine ships its art twice: as a packed page, and as a plain
+text descriptor beside it naming every region and where it sits. Unity has no Sprite
+asset for any of them — the Spine runtime cuts them itself — so the sprite stage walked
+past several thousand pieces. `assetlab/spine.py` reads both dialects in the wild:
+
+```
+adam.png                       Super_Thunder.png
+size: 256,64                   size:1906,586
+agiz01                         01_Alt
+  rotate: false                bounds:702,297,142,63
+  xy: 147, 2                   rotate:90
+  size: 25, 16
+```
+
+Regions become sprites like any other, with the page recorded as their atlas, so they
+get thumbnails, group into objects by name and show their own cuts on the sheet. The
+conversion that matters is the origin: a descriptor measures down from the top-left
+and Unity measures up from the bottom-left. Across five builds this recovered 3,862
+regions.
+
+Two mistakes on the way, both caught by measuring rather than by looking:
+
+- A page exported at half the size the descriptor was written for put every rect out
+  of bounds. The image is the authority on its own size, so the rects scale to it.
+- A page is named by bare filename, and a build is free to call one `01.png`. Taking
+  the first match anywhere in the tree cut 158-pixel regions out of an unrelated
+  256×256 image. The descriptor states the size it expects, so that picks between
+  candidates — and where nothing matches, the regions are refused rather than cut from
+  the wrong picture. That is 246 regions across two builds now honestly reported
+  instead of 85 silently wrong ones.
+
+### When a build's sprites cannot be placed at all
+
+A build that packs with Unity's SpriteAtlas keeps each sprite's packed position in the
+atlas asset rather than in the sprite. Where the export omits that asset the sprites
+carry `texture: {fileID: 0}`, an atlas tag, and nothing else — one catalogue placed
+1,446 of 19,037. `doctor` asserts the placement rate and names the cause; the pages
+themselves are still catalogued, and any Spine descriptors beside them are still read.
 
 ### Testing the part that runs in the browser
 

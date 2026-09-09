@@ -45,6 +45,13 @@ SCRIPT_RATIO_MIN_ASSETS = 500
 #: and the one whose script types never resolved sits at 0.007. The cut is set
 #: below the healthy floor by a factor of two and above the failure by seven.
 MECHANIC_VOCABULARY_FLOOR = 0.05
+#: How many of a build's Sprite assets should end up with a rect on a page. Where the
+#: sprite carries its own texture this is near enough all of them - four builds land
+#: between 0.90 and 1.00. A build that packs with Unity's SpriteAtlas keeps the packed
+#: position in the atlas asset instead, and where the export omits that asset the
+#: sprites cannot be placed at all: one catalogue placed 1,446 of 19,037.
+SPRITE_PLACEMENT_FLOOR = 0.5
+SPRITE_PLACEMENT_MIN = 200
 #: Vocabularies smaller than this are too small for a ratio to mean anything.
 MECHANIC_MIN_FEATURES = 60
 #: How many files may be opened while looking for a Tiled corpus. Candidate groups
@@ -516,7 +523,10 @@ def catalogue_metrics(database: Path) -> dict[str, float] | None:
         assets = scalar("SELECT COUNT(*) FROM assets")
         if not assets:
             return None
-        found = {"assets": assets}
+        found = {"assets": assets,
+                 "sprite_assets": scalar(
+                     "SELECT COUNT(*) FROM assets WHERE unity_type='Sprite'"),
+                 "sprite_rects": scalar("SELECT COUNT(*) FROM sprites")}
         for name, (sql, divisor) in OUTCOME_METRICS.items():
             found[name] = scalar(sql) / (assets if divisor == "assets" else 1)
         return found
@@ -561,6 +571,25 @@ def diagnose_outcome(out: Path, peers: list[Path] | None = None) -> Diagnosis:
         else:
             result.add(OK, f"{mechanics:.0f} mechanics against {features:.0f} features "
                            f"({ratio:.3f}) - vocabulary is self-consistent")
+
+    # The second assertion: art the build ships that the catalogue could not place.
+    declared, placed = mine.get("sprite_assets", 0), mine.get("sprite_rects", 0)
+    if declared >= SPRITE_PLACEMENT_MIN:
+        share = placed / declared
+        if share < SPRITE_PLACEMENT_FLOOR:
+            result.add(FAIL,
+                       f"{placed:.0f} of {declared:.0f} sprites have a rect on a page "
+                       f"({share:.2f}) - most of this build's art is not placed",
+                       "the sprites name an atlas but carry no texture of their own, "
+                       "which is what Unity's SpriteAtlas packing looks like: the "
+                       "packed position lives in the atlas asset, and this export "
+                       "does not contain it. The pages themselves are catalogued, and "
+                       "any Spine descriptors beside them are read; the rest cannot "
+                       "be recovered from these files.",
+                       blocking=False)
+        else:
+            result.add(OK, f"{placed:.0f} of {declared:.0f} sprites placed "
+                           f"({share:.2f})")
 
     if len(others) < 3:
         result.add(OK, f"{len(others)} peer catalogue(s) - too few to compare against")

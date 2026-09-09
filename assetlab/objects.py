@@ -6,7 +6,12 @@ a balloon dog's ear as a whole object because nobody called it a fragment. Measu
 on one build it put 72 of Balloon's 85 sprites on the "whole" side, every one of them
 a limb, and left DragonToy with no whole at all.
 
-Two kinds of evidence replace it, and neither needs a word list.
+Three kinds of evidence replace it, and none needs a word list.
+
+Before either of the two below comes anything the build states outright. A Spine atlas
+descriptor holds one skeleton's art and nothing else, so its regions are one object
+however they are named - and they are named `01_Alt` and `01_02`, which no reading of
+names could group.
 
 The first is the artists' own naming. A part's name extends the whole's: `TB_dog`
 owns `TB_dogEar_1`, `TB_dogNose`, `TB_dogTail`. Compared as token lists rather than
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from pathlib import Path
 
 #: The seams an artist actually types: a separator, the join between a lower-case run
 #: and a capital, and the join between a letter and a digit.
@@ -136,6 +142,16 @@ def group_objects(records: list[dict], rigs: list[tuple[int, list[str]]]) -> lis
         if len("".join(tokens[index])) >= MIN_STEM:
             owner_of.setdefault(tokens[index], index)
 
+    # Where a record says which set it belongs to, that settles it. An atlas
+    # descriptor holds one skeleton's art and nothing else, so its regions are one
+    # object however they are named - and they are named `01_Alt` and `01_02`, which
+    # no reading of names could group.
+    declared: dict[str, list[int]] = defaultdict(list)
+    for index in sprites:
+        marker = records[index].get("set")
+        if marker:
+            declared[marker].append(index)
+
     parent: dict[int, int] = {}
     for index in sprites:
         word = tokens[index]
@@ -194,7 +210,19 @@ def group_objects(records: list[dict], rigs: list[tuple[int, list[str]]]) -> lis
 
     objects: list[dict] = []
     home: dict[int, int] = {}          # sprite index -> objects[] position
+    for marker, members in sorted(declared.items()):
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda i: records[i]["n"])
+        for index in members:
+            home[index] = len(objects)
+        objects.append({"n": Path(marker).name.split(".atlas")[0] or marker,
+                        "w": None, "p": members, "c": None,
+                        "fam": records[members[0]].get("mechanic")
+                        or records[members[0]].get("feature")})
     for whole in sorted(children, key=lambda i: records[i]["n"]):
+        if whole in home or any(index in home for index in children[whole]):
+            continue                   # already placed by the set the build declared
         parts = sorted(children[whole], key=lambda i: records[i]["n"])
         home[whole] = len(objects)
         for part in parts:

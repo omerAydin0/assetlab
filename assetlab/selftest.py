@@ -16,6 +16,7 @@ from .classify import (feature_from_project_dir, feature_from_container_path,
 from .core import infer_type, make_thumbnail
 from .mesh import parse_mesh
 from .objects import group_objects, name_tokens
+from .spine import cut, fit_to_page, parse_atlas
 from .models import parse_material, parse_prefab_models
 from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
 from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
@@ -624,6 +625,18 @@ def object_checks() -> None:
     check("parts that are all the size of the whole are copies of it",
           max(len(o["p"]) for o in group_objects(swatches, [])), 0)
 
+    # A set the build declares outranks the names, which here say nothing.
+    skeleton = [sprite("01_Alt", 40, 20), sprite("01_Ust", 40, 30),
+                sprite("02_Alt", 40, 20), sprite("unrelated_button", 30, 30)]
+    for index in range(3):
+        skeleton[index]["set"] = "TextAsset/Disco_280px.atlas.txt"
+    grouped = group_objects(skeleton, [])
+    declared = next(o for o in grouped if len(o["p"]) > 1)
+    check("an atlas descriptor's regions are one object",
+          (declared["n"], len(declared["p"]), declared["w"]), ("Disco_280px", 3, None))
+    check("a sprite outside the descriptor stays outside the object",
+          all(skeleton[i]["n"] != "unrelated_button" for i in declared["p"]), True)
+
     check("token split follows the seams an artist types",
           name_tokens("Blocks-Balloon-blueTB_dogEar_1"),
           ("blocks", "balloon", "blue", "tb", "dog", "ear", "1"))
@@ -653,6 +666,83 @@ def thumbnail_checks() -> None:
         with Image.open(wide) as made:
             check("and keeps its proportions",
                   made.convert("RGB").getpixel((112, 40))[1] > 200, False)
+
+
+def spine_checks() -> None:
+    """Reading the two atlas dialects a build's skeletal art is described in."""
+    classic = """
+adam.png
+size: 256,64
+format: RGBA8888
+filter: Linear,Linear
+repeat: none
+agiz01
+  rotate: false
+  xy: 147, 2
+  size: 25, 16
+  orig: 25, 16
+  offset: 0, 0
+  index: -1
+burun
+  rotate: true
+  xy: 164, 20
+  size: 10, 11
+  orig: 10, 11
+  offset: 0, 0
+  index: -1
+"""
+    regions = parse_atlas(classic)
+    check("both regions read from the old dialect", len(regions), 2)
+    check("its rect is xy plus size",
+          [regions[0][key] for key in ("x", "y", "w", "h")], [147, 2, 25, 16])
+    check("a rotate flag is a quarter turn", regions[1]["turn"], 90)
+    check("the page carries its own size",
+          (regions[0]["page"], regions[0]["page_w"], regions[0]["page_h"]),
+          ("adam.png", 256, 64))
+
+    modern = """
+Super_Thunder.png
+size:1906,586
+filter:Linear,Linear
+pma:true
+01_Alt
+bounds:702,297,142,63
+offsets:2,2,146,67
+rotate:90
+plain
+bounds:10,20,30,40
+"""
+    regions = parse_atlas(modern)
+    check("both regions read from the new dialect", len(regions), 2)
+    check("its rect is one bounds line",
+          [regions[0][key] for key in ("x", "y", "w", "h", "turn")],
+          [702, 297, 142, 63, 90])
+    check("a region with no rotate line is not turned", regions[1]["turn"], 0)
+
+    # A page line names an image and is followed by a size; a region named like one
+    # would otherwise swallow the regions after it.
+    check("only a line naming an image opens a page",
+          [r["name"] for r in parse_atlas(
+              "sheet.png\nsize:64,64\nicon.png\nbounds:1,2,3,4\n")],
+          ["icon.png"])
+
+    # A page exported at half the size the descriptor was written for.
+    scaled = fit_to_page(parse_atlas(classic), (128, 32))
+    # Half of 25 is 12.5, and a rect that rounds up would reach past the page it was
+    # just fitted to, so it rounds the way Python rounds a tie: down to even.
+    check("rects follow the page as it was actually exported",
+          [scaled[0][key] for key in ("x", "y", "w", "h")], [74, 1, 12, 8])
+    check("and a page at its declared size is left alone",
+          fit_to_page(parse_atlas(classic), (256, 64))[0]["x"], 147)
+
+    # A turned region occupies the transposed footprint on the page, and comes back
+    # the way it is drawn.
+    sheet = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    sheet.paste(Image.new("RGBA", (20, 8), (255, 0, 0, 255)), (5, 7))
+    piece = cut(sheet, {"x": 5, "y": 7, "w": 8, "h": 20, "turn": 90})
+    check("a turned region is cut transposed and set back", piece.size, (8, 20))
+    upright = cut(sheet, {"x": 5, "y": 7, "w": 20, "h": 8, "turn": 0})
+    check("an unturned region is cut as it lies", upright.size, (20, 8))
 
 
 def outcome_checks() -> None:
@@ -931,6 +1021,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     corpus_checks()
     scriptable_corpus_checks()
     object_checks()
+    spine_checks()
     thumbnail_checks()
     outcome_checks()
 

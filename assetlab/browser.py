@@ -1404,6 +1404,10 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
             "obstacle": row["id"] in obstacles, "sub": subcategory.get(row["id"]),
             "at": 1 if row["guid"] in atlas_pages else None,
             "ac": packed.get(row["guid"]),
+            # A region cut from an atlas descriptor is addressed `<descriptor>#<name>`,
+            # and everything in one descriptor is one skeleton's art. The build said so
+            # itself, which beats any reading of the names.
+            "set": row["rel_path"].split("#")[0] if "#" in row["rel_path"] else None,
             "eng": 1 if row["origin"] == "engine" else None,
             "u": usage.get(row["id"], []),
             "dur": row["duration_seconds"], "rate": row["sample_rate"],

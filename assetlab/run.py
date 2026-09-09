@@ -19,10 +19,10 @@ import time
 from pathlib import Path
 
 from . import (animations, browser, classify, dedup, graph, index, levels, models,
-               profile, skin)
+               profile, skin, spine)
 from .core import connect
 
-STAGE_NAMES = ("profile", "index", "graph", "slice", "models", "skin", "levels",
+STAGE_NAMES = ("profile", "index", "graph", "slice", "spine", "models", "skin", "levels",
                "animations", "classify", "dedup", "browser")
 
 
@@ -60,6 +60,9 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
         ("index", lambda: index.build_index(export, conn)),
         ("graph", lambda: graph.build_graph(export, conn)),
         ("slice", slice_stage),
+        # After slice, so a Spine region can point at a page the catalogue already
+        # holds; before classify, so the art it recovers is labelled with the rest.
+        ("spine", lambda: spine.build(export, out, conn)),
         ("models", models_stage),
         # Rigged clips have no sprite to show, so they are posed and drawn. Runs
         # after models so the mesh and material caches are already warm.
