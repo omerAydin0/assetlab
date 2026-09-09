@@ -348,16 +348,28 @@ An object is one thing on screen, and the browser shows it three ways at once:
 - **Final form** — the object assembled. The composed rig where the build ships a
   clip that draws it, otherwise the sprite it ships whole.
 
-  Which clip is a picture of the object takes four measurements, in order: how much of
-  the object it draws, how much of *the clip* is this object, what it depicts, and how
-  much of itself it has on screen at rest. The third is the existing idle-over-
-  explosion ranking; the second matters more than it sounds. Two clips can each draw
-  all four of an object's sprites while one of them is a lamp animation that merely
-  includes them, and without that term the lamp won. The catalogue used to record
-  whichever clip came first, which put the koala's *appear* in front of its *idle* and
-  the dragon's *collect* — its destruction — in front of six idles. Ranked on the page
-  rather than in the catalogue, because the curve sampler that decides what is
-  actually on screen lives there.
+  Which clip is a picture of the object is decided by a gate and then a ranking. The
+  catalogue used to record whichever clip came first, which put the koala's *appear* in
+  front of its *idle* and the dragon's *collect* — its destruction — in front of six
+  idles. Ranked on the page rather than in the catalogue, because the curve sampler
+  that decides what is actually on screen lives there.
+
+  **The gate.** A clip sharing one sprite with an object is a coincidence, not a
+  portrait — a bird's clip that happens to draw a bowtie. And a clip must have the
+  object on screen: one build ships the same rocket as a fall-start and a fall-end, and
+  the start has two of its sixteen sprites drawn where the end has fifteen. Ranking a
+  start above an end — which it is, as a depiction — put two sprites in front of the
+  reader. What is counted is how much of *the object* is drawn, not how much of the
+  clip: a two-layer clip showing both of its layers is not beaten by a six-layer one
+  showing all six, and getting that backwards is what the test suite caught first.
+  Candidates are measured against the best any of them manages, so an object whose
+  every clip is sparse still gets one — and the panel then says so.
+
+  **The ranking**, over what survives: how much of the object it draws, how much of
+  *the clip* is this object, what it depicts, how much it shows. The second term
+  matters more than it sounds — two clips can each draw all four of an object's
+  sprites while one is a lamp animation that merely includes them, and without it the
+  lamp won.
 
   Two readings are stated rather than hidden. A prefab can ship its whole rig switched
   off — one build authors the koala with its body, head, ears and feet all inactive and

@@ -452,11 +452,22 @@ function objectPanel(o){
   const crowd = figures > 1
     ? `<p style="color:var(--dim);font-size:13px;margin:4px 0">This clip draws
        ${figures} separate figures; this object is one of them.</p>` : "";
+  // Sometimes no clip in the build shows the thing whole - a gift box animates one
+  // state at a time, and five of its fifty sprites are on screen at once. The best
+  // available is still shown, with what it is saying about itself.
+  const onScreen = clip && clip.layers
+    ? objectOnScreen(clip, new Set(members.map(d => d.img))) : 0;
+  const partial = clip && clip.layers && onScreen < members.length * 0.4
+    ? `<p style="color:var(--dim);font-size:13px;margin:4px 0">This is the fullest
+       clip the build has for it, and it holds ${onScreen} of the ${members.length}
+       sprites on screen at once — the rest belong to states it does not show.</p>`
+    : "";
   const woken = clip && clip.woken
     ? `<p style="color:var(--dim);font-size:13px;margin:4px 0">The prefab ships these
        parts switched off — the build turns them on at run time — so they are
        drawn here as authored rather than as an empty stage.</p>` : "";
-  const final = clip && clip.layers ? crowd + woken + rigStage(clip) + clipControls(clip)
+  const final = clip && clip.layers
+    ? crowd + woken + partial + rigStage(clip) + clipControls(clip)
     : hero ? `<img src="${hero.img}" style="max-height:260px">`
            : `<p style="color:var(--dim)">nothing to show</p>`;
   return `<button class="close"
@@ -475,6 +486,14 @@ function objectPanel(o){
 // panel showed an almost empty stage where the idle would have shown the animal.
 // Ranked here rather than in the catalogue because the curve sampler that decides
 // what is actually on screen lives on this page.
+// How much of one object a clip has on screen at the moment it would be shown.
+function objectOnScreen(clip, mine){
+  const {poseAt} = rigFit(clip.layers, clip.nodes, clip.clipdur, clip.masks);
+  const seen = new Set();
+  for (const layer of clip.layers)
+    if (mine.has(layer.img) && layerStyle(layer, poseAt) !== "none") seen.add(layer.img);
+  return seen.size;
+}
 // How much of itself a clip has on screen at the moment it would be shown.
 function clipShows(clip){
   const {poseAt} = rigFit(clip.layers, clip.nodes, clip.clipdur, clip.masks);
@@ -508,33 +527,44 @@ function objectClip(o){
   if (o.c == null) return null;
   const mine = new Set(objMembers(o).map(d => d.img));
   const build = (objHero(o) || {}).g;
-  let best = null, bestKey = null, fallback = null;
+  const able = [];
   for (const d of DATA){
     if (!d.layers || !d.layers.length) continue;
     if (build !== undefined && d.g !== build) continue;
     const drawn = new Set(d.layers.map(layer => layer.img));
     let covers = 0;
     for (const image of drawn) if (mine.has(image)) covers++;
-    if (!covers) continue;
+    // One sprite in common is a coincidence, not a portrait. A bird's clip that
+    // happens to draw a bowtie is not a picture of the bowtie.
+    if (covers < 2) continue;
     // How much of the clip is this object. Two clips can draw all four of an
-    // object's sprites while one of them is a lamp animation that happens to include
-    // them; the one that is mostly about this object is the picture of it. Bucketed
-    // so a rounding difference cannot outrank what the clip depicts.
-    const share = Math.round(covers / drawn.size * 20);
-    // A clip that has almost nothing on screen at rest is not a picture of anything,
-    // whatever it is named and however much art it names - unless nothing it could
-    // have chosen would show either, which is what wakeRig settles below.
-    const shown = clipShows(d);
-    if (shown < 2) { fallback = fallback && fallback.layers.length >= d.layers.length
-                                ? fallback : d; continue; }
-    // How much of the object it draws first, then what it depicts - an idle or a tap
-    // over an explosion - then how much of itself it actually shows.
-    const key = [-covers, -share, clipRank(d.n), -shown, -d.layers.length];
-    if (!bestKey || before(key, bestKey)) { best = d; bestKey = key; }
+    // object's sprites while one of them is a lamp animation that happens to
+    // include them; the one that is mostly about this object is the picture of it.
+    // Bucketed so a rounding difference cannot outrank what the clip depicts.
+    able.push({d, covers, share: Math.round(covers / drawn.size * 20),
+               visible: objectOnScreen(d, mine), shown: clipShows(d)});
   }
-  const chosen = best || fallback || DATA[o.c];
-  if (chosen && chosen.layers) wakeRig(chosen);
-  return chosen;
+  if (!able.length) return null;
+  // Visibility gates before anything else ranks. A build ships the same rocket as a
+  // fall-start and a fall-end; the start has two of the rocket's sixteen sprites on
+  // screen and the end has fifteen, and ranking a start above an end - which it is,
+  // as a depiction - put two sprites in front of the reader. What counts is how much
+  // of *the object* is drawn, not how much of the clip: a two-layer clip showing both
+  // of its layers is not beaten by a six-layer one showing all six. Measured against
+  // the best any candidate manages, so an object whose every clip is sparse still
+  // gets one.
+  const most = Math.max(...able.map(entry => entry.visible));
+  const usable = able.filter(entry => entry.visible >= most * 0.5);
+  let best = null, bestKey = null;
+  for (const entry of usable){
+    // How much of the object it draws, then how much of it is this object, then what
+    // it depicts - an idle or a tap over an explosion - then how much it shows.
+    const key = [-entry.covers, -entry.share, clipRank(entry.d.n), -entry.shown,
+                 -entry.d.layers.length];
+    if (!bestKey || before(key, bestKey)) { best = entry.d; bestKey = key; }
+  }
+  if (best && best.layers) wakeRig(best);
+  return best;
 }
 // Whether the clip draws one thing or several. Sprites that belong to one object
 // overlap - a dragon's head sits on its body - while three elves standing in a row

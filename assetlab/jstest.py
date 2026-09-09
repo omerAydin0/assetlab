@@ -130,6 +130,27 @@ const f1 = sprite("gem", 10, 10, {ax: sheetA, r: [20, 0, 10, 10, 0]});
 const f2 = sprite("gem_spark", 10, 10, {ax: sheetB, r: [0, 0, 10, 10, 0]});
 const objSheets = object("gem", f1, [f2], null, sheetA);
 
+// H. The same rocket as a fall-start and a fall-end. As a depiction the start ranks
+//    higher; as a picture of the rocket it has almost none of it on screen.
+const h1 = sprite("nose", 30, 30), h2 = sprite("fin", 20, 20), h3 = sprite("body", 30, 40);
+clip("VerticalFallStartAnimation", [{img: "nose", off: true}, {img: "fin", off: true},
+                                    {img: "body"}, {img: "smoke"}]);
+clip("VerticalFallEndAnimation", [{img: "nose"}, {img: "fin"}, {img: "body"},
+                                  {img: "smoke"}]);
+const objRocket = object("rocket", h3, [h1, h2], DATA.length - 2);
+
+// I. A clip that shares one sprite with an object is not a picture of it.
+const i1 = sprite("bowtie", 20, 10), i2 = sprite("bowtie_knot", 8, 8);
+clip("BirdIdleAnimation", [{img: "bowtie"}, {img: "wing"}, {img: "beak"}]);
+const objBowtie = object("bowtie", i1, [i2], DATA.length - 1);
+
+// J. No clip in the build shows the whole of it: one state at a time.
+const j1 = sprite("box_lid", 30, 20), j2 = sprite("box_body", 30, 30);
+const j3 = sprite("box_ribbon", 20, 20);
+clip("GiftBoxState4Tap", [{img: "box_lid", off: true}, {img: "box_body"},
+                          {img: "box_ribbon", off: true}, {img: "sparkle"}]);
+const objPartial = object("box", j2, [j1, j3], DATA.length - 1);
+
 // G. A mechanic's art is mostly loose sprites that belong to no object.
 const g1 = sprite("snowball_01", 30, 30);
 object("snowball_01", g1, [], null);
@@ -172,6 +193,15 @@ check("the caption counts the sheet's own sprites and this object's",
 
 check("an object's members are its whole and its parts",
       objMembers(FIXTURE_OBJECTS[objSheets]).length, 2);
+check("a clip with the object on screen beats one that ranks higher and hides it",
+      objectClip(FIXTURE_OBJECTS[objRocket]).n, "VerticalFallEndAnimation");
+check("one sprite in common is not a portrait",
+      objectClip(FIXTURE_OBJECTS[objBowtie]), null);
+
+check("a panel that can only show part of an object says which part",
+      /holds 1 of the 3 sprites on screen/.test(
+        objectPanel(FIXTURE_OBJECTS[objPartial]).replace(/\s+/g, " ")), true);
+
 const split = familyObjects([DATA[a1], DATA[a2], DATA[g1]]);
 check("a family separates what comes apart from what does not",
       [split.sets.length, split.loose.map(d => d.n)], [1, ["snowball_01"]]);
