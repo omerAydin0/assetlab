@@ -346,9 +346,29 @@ compose into rigs totalling 36,235 layers.
 An object is one thing on screen, and the browser shows it three ways at once:
 
 - **Final form** — the object assembled. The composed rig where the build ships a
-  clip that draws it, otherwise the sprite it ships whole. Clips are ranked so an idle
-  or tap state is preferred over an explosion, and a clip carrying a small fraction of
-  the object's art is rejected however it is named.
+  clip that draws it, otherwise the sprite it ships whole.
+
+  Which clip is a picture of the object takes four measurements, in order: how much of
+  the object it draws, how much of *the clip* is this object, what it depicts, and how
+  much of itself it has on screen at rest. The third is the existing idle-over-
+  explosion ranking; the second matters more than it sounds. Two clips can each draw
+  all four of an object's sprites while one of them is a lamp animation that merely
+  includes them, and without that term the lamp won. The catalogue used to record
+  whichever clip came first, which put the koala's *appear* in front of its *idle* and
+  the dragon's *collect* — its destruction — in front of six idles. Ranked on the page
+  rather than in the catalogue, because the curve sampler that decides what is
+  actually on screen lives there.
+
+  Two readings are stated rather than hidden. A prefab can ship its whole rig switched
+  off — one build authors the koala with its body, head, ears and feet all inactive and
+  turns them on from code — and honouring that flag faithfully drew an empty box for an
+  animal the build plainly draws; where the flag is what hides it (and not the clip's
+  own curves, which switch between three eyelids on purpose) the parts are drawn as
+  authored and the panel says so. And a clip can draw several figures at once — three
+  elves in a row, a mouse animated beside a rhino — which is counted by connecting
+  sprites that overlap, and said on the panel. Sprites that make up one object overlap;
+  figures standing apart share no pixels. Two figures that touch still read as one,
+  which is the limit of a box test.
 - **Sprite atlas** — the sheet its sprites were packed on, with this object's own
   cuts outlined on it. This is the one view that says which art the studio chose to
   pack together and where the object sits among it.
