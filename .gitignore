@@ -23,6 +23,9 @@ __pycache__/
 *.db
 *.sqlite*
 *.html
+# ...but the page's own templates are source, not output. Without this the
+# repository ships a browser.py that cannot find the page it renders.
+!assetlab/web/*.html
 *.png
 *.jpg
 *.jpeg

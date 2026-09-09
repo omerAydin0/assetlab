@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .browser import RIG_ENGINE, SHARED_VIEWS
+from .browser import MODEL_VIEW, RIG_ENGINE, SHARED_VIEWS
 
 #: Where a Chromium sits on a machine that never installed one on purpose.
 BROWSER_HINTS = (
@@ -151,6 +151,17 @@ clip("GiftBoxState4Tap", [{img: "box_lid", off: true}, {img: "box_body"},
                           {img: "box_ribbon", off: true}, {img: "sparkle"}]);
 const objPartial = object("box", j2, [j1, j3], DATA.length - 1);
 
+// K. The model view, which both pages share. The hub names the build a model came
+//    from and a per-build page has no builds to name, so the same code has to do both.
+const FIXTURE_MODELS = [{g: "Goliath", prefab_id: "p1", prefab_name: "Chair",
+                         path: "Chair", object_name: "Seat", mesh_name: "SM_Seat",
+                         mesh_bytes: 2048, skinned: false, render: null, tris: 900,
+                         materials: [{name: "Wood", colour: {hex: "#8b5a2b"},
+                                      textures: [{slot: "_BaseMap", name: "wood",
+                                                  img: "wood.png"}]}]}];
+const FIXTURE_SCENES = [{g: "Goliath", id: "p1", name: "Chair", render: "r.png",
+                         parts: 1, tris: 900}];
+
 // G. A mechanic's art is mostly loose sprites that belong to no object.
 const g1 = sprite("snowball_01", 30, 30);
 object("snowball_01", g1, [], null);
@@ -202,6 +213,18 @@ check("a panel that can only show part of an object says which part",
       /holds 1 of the 3 sprites on screen/.test(
         objectPanel(FIXTURE_OBJECTS[objPartial]).replace(/\s+/g, " ")), true);
 
+check("a model card names its mesh and its materials",
+      /SM_Seat/.test(modelCard(FIXTURE_MODELS[0], 0)) &&
+      /1 material/.test(modelCard(FIXTURE_MODELS[0], 0)), true);
+check("with no builds to name, no build is named",
+      /undefined/.test(modelCard(FIXTURE_MODELS[0], 0) +
+                       modelPanel(FIXTURE_MODELS[0]) +
+                       sceneCard(FIXTURE_SCENES[0], 0)), false);
+check("an albedo stands for the surface where there is one",
+      /wood\.png/.test(modelPanel(FIXTURE_MODELS[0])), true);
+check("a scene's parts are the models of that scene in that build",
+      /Chair/.test(scenePanel(FIXTURE_SCENES[0])), true);
+
 const split = familyObjects([DATA[a1], DATA[a2], DATA[g1]]);
 check("a family separates what comes apart from what does not",
       [split.sets.length, split.loose.map(d => d.n)], [1, ["snowball_01"]]);
@@ -229,6 +252,7 @@ addEventListener("error", event => {
 __FIXTURES__
 __RIG_ENGINE__
 __SHARED_VIEWS__
+__MODEL_VIEW__
 __CHECKS__
 </script></body></html>
 """
@@ -244,6 +268,9 @@ def run(browser: Path | None = None) -> dict:
     # exercise the code that ships rather than a copy of it.
     page = (PAGE.replace("__FIXTURES__", FIXTURES)
                 .replace("__RIG_ENGINE__", RIG_ENGINE)
+                .replace("__MODEL_VIEW__",
+                         MODEL_VIEW.replace("__MODELS__", "FIXTURE_MODELS")
+                                   .replace("__SCENES__", "FIXTURE_SCENES"))
                 .replace("__SHARED_VIEWS__",
                          SHARED_VIEWS.replace("__OBJECTS__", "FIXTURE_OBJECTS"))
                 .replace("__CHECKS__", CHECKS))

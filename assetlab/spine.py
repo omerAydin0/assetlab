@@ -36,6 +36,8 @@ from PIL import Image
 
 from .core import dhash, image_stats, load_rgba
 
+#: What a packed page may be stored as.
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tga"}
 #: A page line names an image; a region line names a region.
 PAGE_RE = re.compile(r"\.(png|jpg|jpeg|webp|tga)$", re.I)
 #: Every atlas key is `name:value`, with or without the space the old dialect uses.
@@ -55,7 +57,6 @@ def parse_atlas(text: str) -> list[dict]:
     ``turn`` is how far the region was turned when it was packed, in degrees, so a
     reader knows both the footprint it occupies on the page and how to set it back.
     """
-    pages: list[dict] = []
     regions: list[dict] = []
     page: dict | None = None
     pending: str | None = None
@@ -103,7 +104,6 @@ def parse_atlas(text: str) -> list[dict]:
                 close()
                 measures = _numbers(size.group(2))
                 page = {"page": stripped, "w": measures[0], "h": measures[1]}
-                pages.append(page)
                 continue
         close()
         pending = stripped
@@ -111,7 +111,34 @@ def parse_atlas(text: str) -> list[dict]:
     return regions
 
 
-def page_image(descriptor: Path, page: str, assets_root: Path,
+def footprint(region: dict) -> tuple[int, int]:
+    """The box a region occupies on the page, transposed if it was packed turned."""
+    turned = region["turn"] in (90, 270)
+    return (region["h"] if turned else region["w"],
+            region["w"] if turned else region["h"])
+
+
+def on_page(region: dict, size: tuple[int, int]) -> bool:
+    """Whether the region is inside the page it claims to sit on."""
+    wide, tall = footprint(region)
+    return (region["x"] >= 0 and region["y"] >= 0
+            and region["x"] + wide <= size[0] and region["y"] + tall <= size[1])
+
+
+def image_index(assets_root: Path) -> dict[str, list[Path]]:
+    """Every image in the export, by filename.
+
+    Built once. Resolving each page with its own `rglob` walked a 40,000-file export
+    sixty-seven times for one build.
+    """
+    found: dict[str, list[Path]] = {}
+    for path in assets_root.rglob("*"):
+        if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file():
+            found.setdefault(path.name, []).append(path)
+    return found
+
+
+def page_image(descriptor: Path, page: str, index: dict[str, list[Path]],
                declared: tuple[int, int] | None = None) -> Path | None:
     """The packed page a descriptor names, wherever the export happened to put it.
 
@@ -121,18 +148,13 @@ def page_image(descriptor: Path, page: str, assets_root: Path,
     what picks between candidates. A page half the declared size is still the page -
     the export downscaled it - but one at a different shape is a different picture.
     """
-    candidates: list[Path] = []
-    beside = descriptor.parent / page
-    if beside.is_file():
-        candidates.append(beside)
-    flat = assets_root / "Texture2D" / page
-    if flat.is_file() and flat not in candidates:
-        candidates.append(flat)
-    for found in assets_root.rglob(page):
-        if found not in candidates:
-            candidates.append(found)
+    candidates = list(index.get(page, ()))
     if not candidates:
         return None
+    # The one beside the descriptor is the likeliest, and with no size to check
+    # against it is the only reason to prefer any of them.
+    beside = descriptor.parent / page
+    candidates.sort(key=lambda path: path != beside)
     if declared is None:
         return candidates[0]
     fallback = None
@@ -207,6 +229,50 @@ def read_text(path: Path) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def record(conn: sqlite3.Connection, descriptor: Path, assets_root: Path,
+           region: dict, target: Path, guid: str | None) -> None:
+    """Put one cut region into the catalogue as a sprite like any other."""
+    rel = f"{descriptor.relative_to(assets_root).as_posix()}#{region['name']}"
+    with load_rgba(target) as piece:
+        info = image_stats(piece)
+        fingerprint = dhash(piece)
+    # Updated in place rather than replaced. `INSERT OR REPLACE` deletes the row and
+    # inserts a new one, which hands the region a new id and orphans every tag classify
+    # wrote against the old - silently, and only on a second run of this stage.
+    conn.execute(
+        """INSERT INTO assets
+             (guid, rel_path, name, unity_type, ext, size_bytes, width, height,
+              has_alpha, alpha_ratio, is_grayscale, dominant_hex, dhash, image_path,
+              origin)
+           VALUES (NULL, :rel, :name, 'Sprite', 'atlas', :bytes, :width, :height,
+                   :has_alpha, :alpha_ratio, :is_grayscale, :dominant_hex, :dhash,
+                   :image, 'game')
+           ON CONFLICT(rel_path) DO UPDATE SET
+             name=excluded.name, unity_type=excluded.unity_type, ext=excluded.ext,
+             size_bytes=excluded.size_bytes, width=excluded.width,
+             height=excluded.height, has_alpha=excluded.has_alpha,
+             alpha_ratio=excluded.alpha_ratio, is_grayscale=excluded.is_grayscale,
+             dominant_hex=excluded.dominant_hex, dhash=excluded.dhash,
+             image_path=excluded.image_path, origin=excluded.origin""",
+        {"rel": rel, "name": region["name"], "bytes": target.stat().st_size,
+         "image": f"sprites/{target.name}", "dhash": fingerprint, **info})
+    if not guid:
+        return
+    asset_id = conn.execute("SELECT id FROM assets WHERE rel_path = ?",
+                            (rel,)).fetchone()[0]
+    # Unity measures a rect up from the bottom of the sheet and an atlas descriptor
+    # measures down from the top; the rest of the pipeline speaks Unity.
+    tall = footprint(region)[1]
+    conn.execute(
+        """INSERT OR REPLACE INTO sprites
+             (asset_id, atlas_guid, x, y, w, h, rotated, sliced_path, ppu,
+              anchor_x, anchor_y, border)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100.0, 0.5, 0.5, NULL)""",
+        (asset_id, guid, region["x"], region["page_h"] - region["y"] - tall,
+         region["w"], region["h"], 1 if region["turn"] in (90, 270) else 0,
+         f"sprites/{target.name}"))
+
+
 def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[str, int]:
     """Cut every Spine region in the export and record it as a sprite."""
     sprite_dir = out_dir / "sprites"
@@ -214,9 +280,10 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
     descriptors = sorted(set(assets_root.rglob("*.atlas.txt")) |
                          set(assets_root.rglob("*.atlas")))
     stats = {"descriptors": len(descriptors), "regions": 0, "cut": 0,
-             "no_page": 0, "out_of_bounds": 0, "reused": 0}
+             "no_page": 0, "out_of_bounds": 0, "reused": 0, "no_atlas": 0}
     if not descriptors:
         return stats
+    index = image_index(assets_root)
 
     # The page is already in the catalogue as a texture, so a region can point at it
     # the way a sliced sprite points at its atlas.
@@ -236,7 +303,7 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
         for region in regions:
             by_page.setdefault(region["page"], []).append(region)
         for page, group in by_page.items():
-            source = page_image(descriptor, page, assets_root,
+            source = page_image(descriptor, page, index,
                                 (group[0]["page_w"], group[0]["page_h"]))
             if source is None:
                 stats["no_page"] += len(group)
@@ -251,56 +318,25 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
                 guid = texture_guid.get(source.name)
                 stem = descriptor.name.split(".atlas")[0]
                 for region in group:
+                    # Checked before the file is either cut or reused. A stale piece
+                    # left by an earlier run against the wrong page would otherwise be
+                    # registered unexamined, which is how eighty-five wrong crops
+                    # survived a re-run of this stage.
+                    if not on_page(region, sheet.size):
+                        stats["out_of_bounds"] += 1
+                        continue
                     safe = SAFE_RE.sub("_", f"{stem}-{region['name']}")[:90]
                     target = sprite_dir / f"{safe}.png"
-                    rel = f"{descriptor.relative_to(assets_root).as_posix()}#{region['name']}"
                     if target.exists():
                         stats["reused"] += 1
                     else:
-                        turned = region["turn"] in (90, 270)
-                        wide = region["h"] if turned else region["w"]
-                        tall = region["w"] if turned else region["h"]
-                        if (region["x"] < 0 or region["y"] < 0
-                                or region["x"] + wide > sheet.width
-                                or region["y"] + tall > sheet.height):
-                            stats["out_of_bounds"] += 1
-                            continue
-                        piece = cut(sheet, region)
-                        piece.save(target, "PNG", optimize=True)
-                    with load_rgba(target) as piece:
-                        info = image_stats(piece)
-                        fingerprint = dhash(piece)
-                    conn.execute(
-                        """INSERT OR REPLACE INTO assets
-                             (guid, rel_path, name, unity_type, ext, size_bytes, width,
-                              height, has_alpha, alpha_ratio, is_grayscale,
-                              dominant_hex, dhash, image_path, origin)
-                           VALUES (NULL, :rel, :name, 'Sprite', 'atlas', :bytes,
-                                   :width, :height, :has_alpha, :alpha_ratio,
-                                   :is_grayscale, :dominant_hex, :dhash, :image,
-                                   'game')""",
-                        {"rel": rel, "name": region["name"],
-                         "bytes": target.stat().st_size,
-                         "image": f"sprites/{target.name}", "dhash": fingerprint,
-                         **info})
-                    asset_id = conn.execute(
-                        "SELECT id FROM assets WHERE rel_path = ?", (rel,)).fetchone()[0]
-                    if guid:
-                        # Unity measures a rect up from the bottom of the sheet and an
-                        # atlas descriptor measures down from the top; the rest of the
-                        # pipeline speaks Unity.
-                        turned = region["turn"] in (90, 270)
-                        tall = region["w"] if turned else region["h"]
-                        conn.execute(
-                            """INSERT OR REPLACE INTO sprites
-                                 (asset_id, atlas_guid, x, y, w, h, rotated,
-                                  sliced_path, ppu, anchor_x, anchor_y, border)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 100.0, 0.5, 0.5, NULL)""",
-                            (asset_id, guid, region["x"],
-                             region["page_h"] - region["y"] - tall,
-                             region["w"], region["h"], 1 if turned else 0,
-                             f"sprites/{target.name}"))
+                        cut(sheet, region).save(target, "PNG", optimize=True)
+                    record(conn, descriptor, assets_root, region, target, guid)
                     stats["cut"] += 1
+                    # Cut, but with no catalogued page to hang it on: the region is
+                    # still art, and the atlas view will have nothing to show for it.
+                    if not guid:
+                        stats["no_atlas"] += 1
     conn.commit()
     return stats
 
@@ -318,7 +354,8 @@ def main() -> None:
     stats = build(args.export.resolve(), args.out.resolve(), conn)
     print(f"spine: {stats['cut']} regions cut from {stats['descriptors']} descriptors "
           f"({stats['reused']} reused, {stats['no_page']} without a page, "
-          f"{stats['out_of_bounds']} out of bounds)")
+          f"{stats['out_of_bounds']} out of bounds, "
+          f"{stats['no_atlas']} with no catalogued page)")
 
 
 if __name__ == "__main__":

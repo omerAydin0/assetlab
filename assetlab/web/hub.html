@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AssetLab hub</title>
+<style>
+:root{--bg:#14161a;--panel:#1c2027;--line:#2c323d;--text:#eef1f5;--dim:#98a2b1;--accent:#6cb6ff}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,Segoe UI,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 16px}
+h1{margin:0 0 10px;font-size:16px}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.games{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:9px}
+input,select{background:#12151a;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:inherit}
+input[type=search]{min-width:230px}
+label.chk{display:flex;align-items:center;gap:6px;color:var(--dim);font-size:13px}
+label.game{display:flex;align-items:center;gap:6px;background:#232833;border:1px solid var(--line);
+ border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer}
+#count{color:var(--dim);font-size:13px;margin-left:auto}
+#filtertoggle{display:none}
+@media (max-width:760px){
+  header{padding:10px 12px;max-height:80vh;overflow-y:auto}
+  h1{display:flex;align-items:center;justify-content:space-between;gap:10px;
+     margin-bottom:8px;font-size:15px}
+  #filtertoggle{display:inline-block;flex:none;background:#232833;color:var(--text);
+    border:1px solid var(--line);border-radius:6px;padding:6px 12px;font:inherit;
+    cursor:pointer}
+  /* Collapsed by default: the tabs and the count are the only things worth a
+     permanent row, and everything else is one tap away. */
+  header:not(.open) .games{display:none}
+  header:not(.open) .controls>:not(.vtabs):not(#count){display:none}
+  .controls{gap:6px}
+  .vtabs{display:flex;width:100%}
+  .vtabs .vtab{flex:1;text-align:center}
+  #count{margin-left:0;width:100%}
+  .games{gap:6px}
+  label.game{font-size:12px;padding:4px 8px;gap:5px}
+  input[type=search]{min-width:0;width:100%}
+  /* Two per row rather than one, which is what made the panel four screens tall. */
+  .controls select{flex:1 1 45%;min-width:0}
+  .grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+  main{padding:12px 12px 60px}
+}
+main{padding:14px 16px 60px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px;cursor:pointer;overflow:hidden}
+.card:hover{border-color:var(--accent)}
+.card img{width:100%;height:118px;object-fit:contain;background:#0e1014;border-radius:5px;display:block}
+.card .ph{height:118px;background:#0e1014;border-radius:5px;display:flex;align-items:center;justify-content:center;color:#5c6675;font-size:30px}
+.card b{display:block;font-weight:500;font-size:12px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card s{display:block;text-decoration:none;color:var(--dim);font-size:11px}
+aside{position:fixed;top:0;right:0;width:390px;max-width:92vw;height:100vh;background:var(--panel);
+ border-left:1px solid var(--line);padding:18px;overflow:auto;transform:translateX(100%);transition:transform .16s;z-index:9}
+aside.open{transform:none}
+aside img{width:100%;object-fit:contain;background:#0e1014;border-radius:8px;max-height:340px}
+/* Composed layers and piece sets must not inherit the single-preview framing: a
+   per-image dark background paints a black box behind every sprite in the rig. */
+#rigstage img{max-width:none;max-height:none;background:none;
+ border-radius:0;object-fit:fill}
+.pieces img{width:auto;max-width:100%;max-height:64px;background:none;border-radius:0;
+ object-fit:contain}
+
+
+aside h2{font-size:15px;margin:12px 0 4px;word-break:break-all}
+aside dl{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px;margin:12px 0}
+aside dt{color:var(--dim)}
+aside dd{margin:0;word-break:break-all}
+button.close{background:none;border:1px solid var(--line);color:var(--dim);border-radius:6px;padding:5px 10px;cursor:pointer}
+.tag{display:inline-block;background:#252b34;border-radius:4px;padding:1px 7px;font-size:11px;color:var(--dim);margin:2px 3px 0 0}
+.vtab{background:#12151a;color:var(--dim);border:1px solid var(--line);padding:7px 14px;
+ cursor:pointer;font:inherit}
+.vtab:first-child{border-radius:6px 0 0 6px}
+.vtab:last-child{border-radius:0 6px 6px 0;border-left:0}
+.vtab.on{background:var(--accent);color:#0d1117;border-color:var(--accent)}
+aside h3{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--accent);
+ margin:16px 0 6px;font-weight:600}
+/* A model has no picture of itself; the surface it is drawn with stands in. */
+.swatch{display:inline-block;width:26px;height:26px;border-radius:5px;
+ border:1px solid var(--line);vertical-align:middle;margin-right:8px}
+.matrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;
+ border-bottom:1px solid var(--line)}
+.matrow:last-child{border-bottom:0}
+.matrow b{font-weight:500;font-size:12px}
+.render{width:100%;aspect-ratio:1;background:#0e1014;border-radius:5px;
+  object-fit:contain;display:block}
+.scenestrip{grid-column:1/-1;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;margin:0 0 22px}
+.scenehead{grid-column:1/-1;font:600 13px/1.5 inherit;color:var(--dim);
+  letter-spacing:.04em;text-transform:uppercase;margin:0 0 10px}
+.maptex{margin:0;position:relative;max-width:46%;display:flex;flex-direction:column;
+  align-items:center;justify-content:center}
+.maptex img{max-width:100%;max-height:100%;opacity:.65}
+.maptex figcaption{position:absolute;bottom:2px;font:600 9px/1.4 inherit;
+  letter-spacing:.03em;color:#cfd6e2;background:#0009;border-radius:3px;padding:0 4px}
+.modelshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ align-items:center;justify-content:center;gap:4px;padding:5px;overflow:hidden}
+.modelshots img{width:auto;height:auto;max-width:46%;max-height:100%;
+ object-fit:contain;background:none;border-radius:0}
+.modelshots .flat{width:44px;height:44px;border-radius:8px;border:1px solid var(--line)}
+.pbadge{font-size:10px;padding:0 5px;border-radius:3px;margin-left:5px;
+ background:#252b34;color:var(--dim);letter-spacing:.4px}
+.pbadge.is3d{background:var(--accent);color:#0d1117}
+aside h3 span{text-transform:none;letter-spacing:0;color:var(--dim);font-weight:400;
+ margin-left:8px;font-size:12px}
+/* An obstacle card shows several of its parts, so a set is recognisable as a set
+   from the grid; a single hero image is indistinguishable from a plain asset. */
+.famcard .famshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ flex-wrap:wrap;gap:3px;padding:4px;align-items:center;justify-content:center}
+.famcard .famshots img{width:auto;height:auto;max-width:calc(50% - 4px);
+ max-height:calc(50% - 4px);object-fit:contain;background:none;border-radius:0}
+.famcard .famshots img:only-child{max-width:100%;max-height:100%}
+/* Obstacle parts are laid out side by side at their own proportions - a corner strip
+   and its body only read as one blocker when they sit next to each other. */
+/* The obstacle panel opens wider than the asset panel: two parts per row is not a
+   comparison, and these sets run to a few dozen pieces. */
+aside.wide{width:min(900px,96vw)}
+.partstrip{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;background:#0e1014;
+ border-radius:8px;padding:12px}
+.partstrip figure{margin:0;text-align:center;max-width:104px}
+.partstrip img{display:block;width:auto;max-width:102px;max-height:84px;background:none;
+ border-radius:0;object-fit:contain;margin:0 auto}
+.partstrip figcaption{color:var(--dim);font-size:10px;margin-top:3px;word-break:break-all}
+.objcard .objshots{height:118px;background:#0e1014;border-radius:5px;display:flex;
+ align-items:center;gap:5px;padding:5px;overflow:hidden}
+.objcard .objshots .hero{max-width:58%;max-height:100%;width:auto;height:auto;
+ object-fit:contain;background:none;border-radius:0}
+.objcard .objbits{display:flex;flex-wrap:wrap;gap:3px;align-items:center;
+ justify-content:center;flex:1;max-height:100%;overflow:hidden}
+.objcard .objbits img{width:auto;height:auto;max-width:44px;max-height:34px;
+ object-fit:contain;background:none;border-radius:0}
+.atlas{position:relative;display:inline-block;max-width:100%;line-height:0;
+ background:#0e1014;border-radius:8px}
+.atlas img{display:block;width:auto;max-width:100%;max-height:420px;background:none;
+ border-radius:8px}
+.atlas i{position:absolute;border:2px solid var(--accent);border-radius:2px;
+ box-shadow:0 0 7px 2px #6cb6ffcc,0 0 0 1px #000a inset;pointer-events:none}
+.objblock{border:1px solid var(--line);border-radius:8px;padding:10px;margin:0 0 10px;
+ cursor:pointer}
+.objblock:hover{border-color:var(--accent)}
+.objblockhead{display:flex;align-items:baseline;gap:10px;margin:0 0 8px}
+.objblockhead small{color:var(--dim);font-size:11px}
+</style></head><body>
+<header>
+  <h1><span>AssetLab <span style="color:var(--dim);font-weight:400">— all games</span></span>
+    <button id="filtertoggle" aria-expanded="false">filters</button></h1>
+  <div class="games" id="games"></div>
+  <div class="controls">
+    <span class="vtabs"><button class="vtab on" data-view="assets">assets</button><button
+      class="vtab" data-view="objects" id="objectstab">objects</button><button
+      class="vtab" data-view="animations" id="animtab">animations</button><button
+      class="vtab" data-view="obstacles">obstacles</button><button
+      class="vtab" data-view="models" id="modelstab">models</button></span>
+    <input type="search" id="q" placeholder="search name / path…">
+    <select id="role"></select><select id="feature"></select>
+    <select id="mechanic"></select><select id="type"></select>
+    <select id="size">
+      <option value="">any size</option><option value="0-63">&lt; 64 px</option>
+      <option value="64-159">64–159 px</option><option value="160-511">160–511 px</option>
+      <option value="512-99999">512 px +</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="obst"> obstacles only</label>
+    <label class="chk"><input type="checkbox" id="atlas" checked> hide atlas sheets</label>
+    <label class="chk"><input type="checkbox" id="eng" checked> hide engine assets</label>
+    <span id="count"></span>
+  </div>
+</header>
+<main><div class="grid" id="grid"></div></main>
+<aside id="panel"></aside>
+<script>
+const DATA = __DATA__, GAMES = __GAMES__;
+const F = ["role","feature","mechanic","type"];
+const el = id => document.getElementById(id);
+// _r is an asset's rank within its own build. The point of holding eight builds on
+// one page is comparison, so the grid deals them out round-robin on it: the first
+// screen is every build's leading art rather than whichever build sorts first, which
+// on this catalogue meant six pages of one game's editor gizmos.
+const RANK = new Map();
+DATA.forEach((d, i) => { d._i = i;
+  const seen = RANK.get(d.g) || 0; d._r = seen; RANK.set(d.g, seen + 1); });
+
+// Each build carries the verdict of its own profile stage, so a thin-looking
+// catalogue can be read as "this one is 3D" rather than as a broken import.
+el("games").innerHTML = GAMES.map(g => {
+  const p = g.profile;
+  const badge = p ? `<span class="pbadge ${p.verdict === "3d" ? "is3d" : ""}"
+    title="${p.note} (score ${p.score})">${p.verdict.toUpperCase()}</span>` : "";
+  return `<label class="game"><input type="checkbox" class="gamebox" value="${g.id}" checked>
+   ${g.title} <span style="color:var(--dim)">${g.count.toLocaleString()}</span>${badge}</label>`;
+}).join("");
+
+function activeGames(){
+  return new Set([...document.querySelectorAll(".gamebox")].filter(b => b.checked)
+                 .map(b => b.value));
+}
+let games = activeGames();
+
+function passes(d, skipKey){
+  if (!games.has(d.g)) return false;
+  // Clips have a tab of their own; leaving them in the asset grid as well buries the
+  // art behind cards that are not pictures of anything.
+  if (VIEW === "assets" && isClip(d)) return false;
+  if (VIEW === "animations" && !isClip(d)) return false;
+  // An atlas sheet is the page its sprites were cut from, not a piece of art.
+  if (el("atlas").checked && d.at) return false;
+  // Unity and its packages ship art of their own - editor gizmos, handle outlines,
+  // dither tables - which lands in the same folders as the studio's and sorts to the
+  // front because it is tiny. It stays in the catalogue, just not in the way.
+  if (el("eng").checked && d.eng) return false;
+  if (el("obst").checked && !d.obstacle) return false;
+  for (const k of F) { if (k === skipKey) continue;
+                       const v = el(k).value; if (v && d[k] !== v) return false; }
+  const s = el("size").value;
+  if (s){ const [lo,hi] = s.split("-").map(Number); const m = Math.max(d.w||0, d.h||0);
+          if (!(m >= lo && m <= hi)) return false; }
+  const q = el("q").value.trim().toLowerCase();
+  if (q && !(d.n.toLowerCase().includes(q) || d.p.toLowerCase().includes(q))) return false;
+  return true;
+}
+const match = d => passes(d, null);
+
+function refreshFacets(){
+  for (const key of F){
+    const select = el(key), current = select.value, counts = {};
+    for (const d of DATA) { if (passes(d, key)) { const v = d[key];
+                            if (v) counts[v] = (counts[v]||0)+1; } }
+    if (current && !(current in counts)) counts[current] = 0;
+    select.innerHTML = `<option value="">all ${key}s</option>` +
+      Object.entries(counts).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]))
+        .map(([v,n]) => `<option value="${v}">${v} (${n})</option>`).join("");
+    select.value = current;
+  }
+}
+
+__RIG_ENGINE__function playClip(frames, duration){
+  stopClip();
+  const img = document.getElementById("clipframe");
+  const label = document.getElementById("clippos");
+  if (!img) return;
+  let i = 0;
+  const step = () => {
+    img.src = frames[i][1];
+    if (label) label.textContent = `${i + 1}/${frames.length}  t=${frames[i][0]}s`;
+    const next = (i + 1) % frames.length;
+    // Hold each frame for its own gap; wrap using the clip's total duration.
+    const gap = next === 0 ? Math.max(0.03, (duration || 0) - frames[i][0])
+                           : frames[next][0] - frames[i][0];
+    i = next;
+    clipTimer = setTimeout(step, Math.max(16, gap * 1000));
+  };
+  step();
+}
+
+// Edge and corner pieces laid out where they belong, so a 1217x60 strip is readable
+// as the top of an obstacle instead of an unexplained sliver.
+const CELL_ORDER = ["tl","t","tr","l","c","r","bl","b","br"];
+function pieceSet(d){
+  const byPos = {};
+  for (const piece of d.pg) (byPos[piece.pos] ||= []).push(piece);
+  const cells = CELL_ORDER.map(pos => {
+    const list = byPos[pos];
+    if (!list) return `<div></div>`;
+    const imgs = list.map(p =>
+      `<img src="${p.img}" title="${p.n} (${p.w}×${p.h})">`).join("");
+    return `<div style="display:flex;gap:3px;flex-wrap:wrap;align-items:center;
+      justify-content:center;min-height:24px">${imgs}</div>`;
+  }).join("");
+  const used = CELL_ORDER.filter(pos => byPos[pos]).join(" ");
+  return `<div class="pieces" style="display:grid;grid-template-columns:1fr 1fr 1fr;
+      gap:4px;background:#0e1014;border-radius:8px;padding:8px">${cells}</div>
+    <small style="color:var(--dim)">${d.pg.length} pieces assembled by position
+      (${used})</small>`;
+}
+function preview(d){
+  if (d.kind === "animation"){
+    const controls = (call, info) => `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <button class="close" onclick="${call}">play</button>
+        <button class="close" onclick="stopClip()">stop</button>
+        <small id="clippos">${info}</small></div>`;
+    if (d.fr) return `<img id="clipframe" src="${d.fr[0][1]}">` +
+      controls(`playClip(DATA[${d._i}].fr, DATA[${d._i}].clipdur)`,
+               `${d.fr.length} frames · ${d.clipdur ?? "?"}s`);
+    return rigStage(d) + controls(`playRig(DATA[${d._i}].layers, DATA[${d._i}].nodes, DATA[${d._i}].clipdur, DATA[${d._i}].masks)`,
+      `${d.layers.length} layers · ${(d.clipdur ?? 0).toFixed(2)}s`);
+  }
+  if (d.pg && d.pg.length > 1) return pieceSet(d);
+  if (d.kind === "image") return `<img src="${d.img}">`;
+  if (d.kind === "audio")
+    return `<audio controls preload="none" style="width:100%" src="${d.href}"></audio>`;
+  if (d.kind === "font")
+    return `<style>@font-face{font-family:"pv${d._i}";src:url("${d.href}")}</style>
+      <div style="font-family:'pv${d._i}',serif;font-size:24px;background:#0e1014;
+                  border-radius:8px;padding:12px">ABCDEFG abcdefg 0123456789<br>
+                  Şeker Ğüzel İçki Öykü</div>`;
+  return "";
+}
+
+let shown = 0, filtered = [];
+const GLYPH = {audio:"♪", font:"A", animation:"▶"};
+function card(d, i){
+  const thumb = d.t ? `<img loading="lazy" src="${d.t}">`
+                    : `<div class="ph">${GLYPH[d.kind] || "·"}</div>`;
+  const sub = d.kind === "audio" ? (d.dur ? d.dur.toFixed(2)+"s" : "audio")
+            : d.kind === "animation"
+              ? (d.fr ? `▶ ${d.fr.length} frames` : `▶ ${d.layers.length} layers`)
+            : d.w ? d.w+"×"+d.h : d.type;
+  return `<div class="card" data-i="${i}">${thumb}<b>${d.n}</b>
+          <s>${GAMEBADGE[d.g]} · ${sub}</s></div>`;
+}
+const GAMEBADGE = Object.fromEntries(GAMES.map(g => [g.id, g.short]));
+
+
+__MODEL_VIEW__// ---- obstacle grouping ----------------------------------------------------
+// The design enums name each blocker, so its art is exactly the tagged assets that
+// carry that name; grouping on it is what turns 800 loose sprites into ~40 obstacles.
+// Only the key differs between this page and the other, so only the key lives here -
+// everything drawn from it comes from SHARED_VIEWS below.
+let VIEW = "assets";
+function familyKey(d){ return (GAMEBADGE[d.g] + " · " + (d.mechanic || d.feature || "unlabelled")); }
+__SHARED_VIEWS__let FAMILIES = [], PAGED = "asset";
+// Three of the five views scroll a flat list, and only the card differs.
+const CARD = {asset: d => card(d, d._i), animation: clipCard, object: objectCard};
+const COUNTED = {asset: "assets", animation: "clips", object: "objects"};
+function render(reset){
+  if (!reset) { if (VIEW === "obstacles") return; }
+  else {
+    refreshFacets();
+    el("grid").innerHTML = "";
+    shown = 0;
+    if (VIEW === "obstacles"){
+      FAMILIES = families();
+      el("grid").innerHTML = FAMILIES.map(([n, p], i) => familyCard(n, p, i)).join("");
+      el("count").textContent = `${FAMILIES.length} obstacles, ` +
+        `${FAMILIES.reduce((s, f) => s + f[1].length, 0)} parts`;
+      return;
+    }
+    if (VIEW === "models"){
+      const query = el("q").value.trim().toLowerCase();
+      const shown = MODELS.map((m, i) => [m, i]).filter(([m]) => games.has(m.g) &&
+        (!query || (m.mesh_name || "").toLowerCase().includes(query) ||
+                   (m.object_name || "").toLowerCase().includes(query) ||
+                   (m.prefab_name || "").toLowerCase().includes(query)));
+      // One row per placement suits the database; a gallery wants one card per
+      // distinct mesh, or a chair leg used four times fills the screen.
+      const seen = new Set();
+      const unique = shown.filter(([m]) => {
+        const key = m.g + "/" + (m.mesh_name || m.object_name);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const assembled = SCENES.map((s, i) => [s, i]).filter(([s]) => games.has(s.g) &&
+        (!query || s.name.toLowerCase().includes(query)));
+      const lead = assembled.length
+        ? `<div class="scenehead">assembled prefabs</div>
+           <div class="scenestrip">${assembled.map(([s, i]) => sceneCard(s, i)).join("")}</div>
+           <div class="scenehead">individual meshes</div>` : "";
+      el("grid").innerHTML = lead +
+        `<div class="scenestrip">${unique.map(([m, i]) => modelCard(m, i)).join("")}</div>`;
+      el("count").textContent = `${unique.length} models, ` +
+        `${unique.filter(([m]) => m.skinned).length} rigged, ` +
+        `${assembled.length} assembled`;
+      return;
+    }
+    if (VIEW === "objects"){
+      PAGED = "object";
+      // Most objects are one sprite that owns nothing, which the assets tab already
+      // shows. What this tab is for is the ones that come apart, so they lead - and
+      // ranking across builds rather than within each keeps the comparison.
+      filtered = OBJECTS.map((o, i) => [o, i]).filter(([o]) => objVisible(o))
+        .sort((a, b) => b[0].p.length - a[0].p.length ||
+              (b[0].c != null) - (a[0].c != null) || a[0].n.localeCompare(b[0].n));
+    } else if (VIEW === "animations"){
+      PAGED = "animation";
+      filtered = DATA.filter(match).sort((a, b) =>
+        (b.layers ? b.layers.length : b.fr ? 1 : 0) -
+        (a.layers ? a.layers.length : a.fr ? 1 : 0) || a.n.localeCompare(b.n));
+    } else {
+      PAGED = "asset";
+      filtered = DATA.filter(match)
+                    .sort((a, b) => a._r - b._r || a.g.localeCompare(b.g));
+    }
+  }
+  const slice = filtered.slice(shown, shown+300);
+  el("grid").insertAdjacentHTML("beforeend", slice.map(CARD[PAGED]).join(""));
+  shown += slice.length;
+  el("count").textContent = `${filtered.length.toLocaleString()} ${COUNTED[PAGED]}` +
+    (shown < filtered.length ? ` (showing ${shown})` : "");
+}
+["q","role","feature","mechanic","type","size","obst","atlas","eng"].forEach(id =>
+  el(id).addEventListener(id === "q" ? "input" : "change", () => render(true)));
+document.querySelectorAll(".gamebox").forEach(box =>
+  box.addEventListener("change", () => {
+    games = activeGames(); syncModelsTab(); render(true); }));
+addEventListener("scroll", () => {
+  if (shown < filtered.length && innerHeight + scrollY > document.body.offsetHeight - 700)
+    render(false);
+});
+document.querySelectorAll(".vtab").forEach(tab => tab.addEventListener("click", () => {
+  document.querySelectorAll(".vtab").forEach(b => b.classList.toggle("on", b === tab));
+  VIEW = tab.dataset.view; render(true);
+}));
+el("filtertoggle").addEventListener("click", event => {
+  const open = document.querySelector("header").classList.toggle("open");
+  event.currentTarget.setAttribute("aria-expanded", String(open));
+  event.currentTarget.textContent = open ? "close" : "filters";
+});
+
+el("grid").addEventListener("click", e => {
+  const scene = e.target.closest("[data-scene]");
+  if (scene){
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = scenePanel(SCENES[+scene.dataset.scene]);
+    panel.classList.add("open");
+    return;
+  }
+  const model = e.target.closest("[data-model]");
+  if (model){
+    stopClip();
+    const panel = el("panel");
+    panel.classList.remove("wide");
+    panel.innerHTML = modelPanel(MODELS[+model.dataset.model]);
+    panel.classList.add("open");
+    return;
+  }
+  const object = e.target.closest("[data-obj]");
+  if (object){ openObject(+object.dataset.obj); return; }
+  const group = e.target.closest("[data-fam]");
+  if (group){
+    stopClip();
+    const [name, parts] = FAMILIES[+group.dataset.fam];
+    const panel = el("panel");
+    panel.innerHTML = familyPanel(name, parts);
+    panel.classList.add("open", "wide");
+    const rig = familyRig(parts);
+    if (rig) poseRig(rig.layers, rig.nodes, rig.masks);
+    return;
+  }
+  const node = e.target.closest(".card"); if (!node) return;
+  stopClip();
+  el("panel").classList.remove("wide");
+  const d = DATA[+node.dataset.i], panel = el("panel");
+  panel.innerHTML = `<button class="close"
+      onclick="stopClip();document.getElementById('panel').classList.remove('open')">close</button>
+    ${preview(d)}<h2>${d.n}</h2>
+    <div>${[GAMEBADGE[d.g], d.role, d.feature, d.mechanic, d.obstacle?"OBSTACLE":""]
+             .filter(Boolean).map(t => `<span class="tag">${t}</span>`).join("")}</div>
+    <dl><dt>type</dt><dd>${d.type}</dd><dt>size</dt><dd>${d.w?d.w+" × "+d.h:"—"}</dd>
+        <dt>path</dt><dd>${d.p}</dd></dl>`;
+  if (d.kind === "animation" && d.layers) poseRig(d.layers, d.nodes, d.masks);
+  panel.classList.add("open");
+});
+// The tab exists only when a selected build has a mesh chain behind it.
+// The panel is outside the grid, so the object blocks inside a family need their
+// own listener.
+el("panel").addEventListener("click", e => {
+  const block = e.target.closest("[data-obj]");
+  if (block) openObject(+block.dataset.obj);
+});
+// A tab only exists while the ticked games have something behind it, and a view that
+// empties under the tick boxes hands the page back to the assets grid.
+function showTab(id, any){
+  el(id).style.display = any ? "" : "none";
+  if (!any && VIEW === el(id).dataset.view){
+    VIEW = "assets";
+    document.querySelectorAll(".vtab").forEach(b =>
+      b.classList.toggle("on", b.dataset.view === "assets"));
+  }
+}
+function syncModelsTab(){
+  showTab("modelstab",
+          MODELS.some(m => games.has(m.g)) || SCENES.some(s => games.has(s.g)));
+  showTab("objectstab", OBJECTS.some(o => objMembers(o).some(d => games.has(d.g))));
+  showTab("animtab", DATA.some(d => games.has(d.g) && isClip(d)));
+}
+syncModelsTab();
+render(true);
+</script></body></html>

@@ -13,10 +13,11 @@ from PIL import Image
 from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
 from .classify import (feature_from_project_dir, feature_from_container_path,
                        match_vocabulary, mechanics_from_holders)
-from .core import infer_type, make_thumbnail
+from .core import connect, infer_type, make_thumbnail
 from .mesh import parse_mesh
 from .objects import group_objects, name_tokens
-from .spine import cut, fit_to_page, parse_atlas
+from .spine import build as spine_build
+from .spine import cut, fit_to_page, footprint, on_page, parse_atlas
 from .models import parse_material, parse_prefab_models
 from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
 from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
@@ -735,6 +736,15 @@ bounds:10,20,30,40
     check("and a page at its declared size is left alone",
           fit_to_page(parse_atlas(classic), (256, 64))[0]["x"], 147)
 
+    # A turned region occupies the transposed footprint, so a bounds check has to ask
+    # about the footprint and not about the region.
+    turned = {"x": 250, "y": 10, "w": 20, "h": 60, "turn": 90}
+    check("a turned region's footprint is transposed", footprint(turned), (60, 20))
+    check("it fits a page wide enough for the footprint",
+          on_page(turned, (320, 100)), True)
+    check("and not one only wide enough for the region",
+          on_page(turned, (280, 100)), False)
+
     # A turned region occupies the transposed footprint on the page, and comes back
     # the way it is drawn.
     sheet = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
@@ -743,6 +753,40 @@ bounds:10,20,30,40
     check("a turned region is cut transposed and set back", piece.size, (8, 20))
     upright = cut(sheet, {"x": 5, "y": 7, "w": 20, "h": 8, "turn": 0})
     check("an unturned region is cut as it lies", upright.size, (20, 8))
+
+
+def spine_catalogue_checks() -> None:
+    """Cutting a descriptor into a catalogue, and cutting it again."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, out = Path(tmp) / "Assets", Path(tmp) / "out"
+        (root / "TextAsset").mkdir(parents=True)
+        (root / "Texture2D").mkdir(parents=True)
+        Image.new("RGBA", (64, 32), (255, 0, 0, 255)).save(
+            root / "Texture2D" / "sheet.png")
+        (root / "TextAsset" / "hero.atlas.txt").write_text(
+            "sheet.png\nsize:64,32\nhead\nbounds:0,0,10,8\nbody\nbounds:20,4,12,16\n", encoding="utf-8")
+        conn = connect(out / "assetlab.db")
+        # The page is in the catalogue, as it is once `index` has run; without that
+        # the regions are still cut but have no atlas to point at.
+        conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type) "
+                     "VALUES ('a' * 32, 'Texture2D/sheet.png', 'sheet', 'Texture2D')")
+        stats = spine_build(root, out, conn)
+        check("both regions cut, both tied to their page",
+              (stats["cut"], stats["out_of_bounds"], stats["no_atlas"]), (2, 0, 0))
+        rows = dict(conn.execute("SELECT name, id FROM assets WHERE ext='atlas'"))
+        check("each region is a sprite in the catalogue", sorted(rows), ["body", "head"])
+
+        # A descriptor measures down from the top and Unity measures up from the
+        # bottom, so an 8-tall region at the top of a 32-tall page lands at y=24.
+        placed = dict(conn.execute(
+            "SELECT a.name, s.y FROM sprites s JOIN assets a ON a.id = s.asset_id"))
+        check("the origin is turned over for Unity", placed["head"], 24)
+
+        again = spine_build(root, out, conn)
+        after = dict(conn.execute("SELECT name, id FROM assets WHERE ext='atlas'"))
+        check("a second run reuses what it already cut", again["reused"], 2)
+        check("and leaves the ids alone, so labels stay attached", after, rows)
+        conn.close()          # Windows will not remove a directory it still holds
 
 
 def outcome_checks() -> None:
@@ -1022,6 +1066,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     scriptable_corpus_checks()
     object_checks()
     spine_checks()
+    spine_catalogue_checks()
     thumbnail_checks()
     outcome_checks()
 

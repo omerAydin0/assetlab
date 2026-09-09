@@ -535,6 +535,28 @@ carry `texture: {fileID: 0}`, an atlas tag, and nothing else — one catalogue p
 1,446 of 19,037. `doctor` asserts the placement rate and names the cause; the pages
 themselves are still catalogued, and any Spine descriptors beside them are still read.
 
+### Where the page lives
+
+The page is written as a page. `assetlab/web/` holds it as real files, read at build
+time and substituted into the template:
+
+```
+web/rig.js        sampling a clip's curves, composing a sprite onto its transform
+                  chain, framing what it reaches and drawing it
+web/views.js      the object, animation and obstacle views
+web/models.js     the mesh chain a 3D build is read through
+web/browser.html  the per-build page: its own header, filters and layout
+web/hub.html      the same for the page holding every build
+```
+
+The first three are shared by both pages. They were duplicated before — 247 lines of
+rig identical to the line — and a one-line fix landed in one copy and not the other,
+which only a measurement on a real build caught. Keeping several hundred lines of
+JavaScript inside Python string literals also cost a working day of escaping accidents
+and hid the code from every tool that reads JavaScript. Extracting them took
+`browser.py` from 1,547 lines to 383 and `hub.py` from 875 to 290, and the pages it
+produces are byte-for-byte what they were.
+
 ### Testing the part that runs in the browser
 
 The rig runs on the page, so `selftest.py` cannot reach it. The checks in
