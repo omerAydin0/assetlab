@@ -120,15 +120,28 @@ def build_index(assets_root: Path, conn: sqlite3.Connection) -> tuple[int, int]:
         if number % 500 == 0:
             print(f"  indexed {number}/{len(files)}", flush=True)
 
+    # Updated in place rather than replaced. `INSERT OR REPLACE` deletes the row and
+    # inserts a new one, which hands every asset a new id and orphans the tags,
+    # sprites, used_by, animations and piece_groups written against the old - on
+    # every re-run of this stage.
     conn.executemany(
-        """INSERT OR REPLACE INTO assets
+        """INSERT INTO assets
            (guid, rel_path, name, unity_type, ext, size_bytes, width, height,
             has_alpha, alpha_ratio, is_grayscale, dominant_hex, sha256, dhash,
             duration_seconds, sample_rate, channels, audio_codec, image_path)
            VALUES (:guid, :rel_path, :name, :unity_type, :ext, :size_bytes, :width,
                    :height, :has_alpha, :alpha_ratio, :is_grayscale, :dominant_hex,
                    :sha256, :dhash, :duration_seconds, :sample_rate, :channels,
-                   :audio_codec, :image_path)""",
+                   :audio_codec, :image_path)
+           ON CONFLICT(rel_path) DO UPDATE SET
+             guid=excluded.guid, name=excluded.name, unity_type=excluded.unity_type,
+             ext=excluded.ext, size_bytes=excluded.size_bytes, width=excluded.width,
+             height=excluded.height, has_alpha=excluded.has_alpha,
+             alpha_ratio=excluded.alpha_ratio, is_grayscale=excluded.is_grayscale,
+             dominant_hex=excluded.dominant_hex, sha256=excluded.sha256,
+             dhash=excluded.dhash, duration_seconds=excluded.duration_seconds,
+             sample_rate=excluded.sample_rate, channels=excluded.channels,
+             audio_codec=excluded.audio_codec, image_path=excluded.image_path""",
         rows,
     )
     conn.execute("INSERT OR REPLACE INTO meta VALUES ('assets_root', ?)", (str(assets_root),))

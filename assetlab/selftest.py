@@ -14,6 +14,7 @@ from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
 from .classify import (feature_from_project_dir, feature_from_container_path,
                        match_vocabulary, mechanics_from_holders)
 from .core import connect, infer_type, make_thumbnail
+from .index import build_index
 from .mesh import parse_mesh
 from .objects import group_objects, name_tokens
 from .spine import build as spine_build
@@ -755,6 +756,34 @@ bounds:10,20,30,40
     check("an unturned region is cut as it lies", upright.size, (20, 8))
 
 
+def index_rerun_checks() -> None:
+    """Indexing the same export twice keeps every asset's id, so its labels hold."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Assets"
+        (root / "TextAsset").mkdir(parents=True)
+        # Two assets, so a replaced row could not happen to get its old id back.
+        for name, guid in (("notes", "a" * 32), ("other", "b" * 32)):
+            (root / "TextAsset" / f"{name}.txt").write_text(name, encoding="utf-8")
+            (root / "TextAsset" / f"{name}.txt.meta").write_text(f"guid: {guid}\n")
+        conn = connect(Path(tmp) / "out" / "assetlab.db")
+        build_index(root, conn)
+        ids = dict(conn.execute("SELECT rel_path, id FROM assets"))
+        conn.execute("INSERT INTO tags VALUES (?, 'role', 'doc', 'high', 'filename')",
+                     (ids["TextAsset/notes.txt"],))
+        (root / "TextAsset" / "notes.txt").write_text("notes, edited", encoding="utf-8")
+        build_index(root, conn)
+        after = dict(conn.execute("SELECT rel_path, id FROM assets"))
+        labelled = [row[0] for row in conn.execute(
+            "SELECT a.rel_path FROM tags t JOIN assets a ON a.id = t.asset_id")]
+        size = conn.execute("SELECT size_bytes FROM assets WHERE rel_path = "
+                            "'TextAsset/notes.txt'").fetchone()[0]
+        conn.close()          # Windows will not remove a directory it still holds
+    check("a second index keeps every asset's id", after, ids)
+    check("so a label written against it still finds it", labelled,
+          ["TextAsset/notes.txt"])
+    check("and the row itself is brought up to date", size, len("notes, edited"))
+
+
 def spine_catalogue_checks() -> None:
     """Cutting a descriptor into a catalogue, and cutting it again."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -1067,6 +1096,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     object_checks()
     spine_checks()
     spine_catalogue_checks()
+    index_rerun_checks()
     thumbnail_checks()
     outcome_checks()
 
