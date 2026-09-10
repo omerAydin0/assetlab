@@ -36,6 +36,11 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
     """
     close_after = conn is None
     conn = conn or connect(out / "assetlab.db")
+    # Recorded on every run, not only by the index stage. A catalogue rebuilt from a
+    # later stage kept the export path its index stage once saw, and after the export
+    # folders were renamed five catalogues pointed at directories that no longer existed.
+    conn.execute("INSERT OR REPLACE INTO meta VALUES ('assets_root', ?)", (str(export),))
+    conn.commit()
     detected: dict = {}
     results: dict = {}
 

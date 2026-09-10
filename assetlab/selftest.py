@@ -13,9 +13,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from .addressables import read_catalog
 from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
-from .classify import (feature_from_project_dir, feature_from_container_path,
-                       match_vocabulary, mechanics_from_holders)
+from .classify import (bundle_reach, feature_from_project_dir,
+                       feature_from_container_path, match_vocabulary,
+                       mechanics_from_holders)
 from .core import connect, infer_type, make_thumbnail
 from .index import build_index
 from .mesh import parse_mesh
@@ -848,6 +850,92 @@ def spine_catalogue_checks() -> None:
         conn.close()          # Windows will not remove a directory it still holds
 
 
+def addressables_checks() -> None:
+    """What a catalogue declares, against what the package it ships in holds."""
+    import base64
+    import json
+    import struct
+    runtime = "{UnityEngine.AddressableAssets.Addressables.RuntimePath}"
+    ids = [runtime + "/Android/ui_shop_assets_all_aaa.bundle",
+           "https://cdn.example.invalid/Android/remotegroup_assets_bg_bbb.bundle",
+           "Assets/UI/Shop.prefab", "Assets/Art/Bg.png"]
+    # internal id, provider, dependency key, dependency hash, data, primary key, type
+    entries = [(0, 0, -1, 0, -1, 0, 0), (1, 0, -1, 0, -1, 1, 0),
+               (2, 1, 0, 0, -1, 2, 1), (3, 1, 1, 0, -1, 3, 1)]
+    entry_blob = struct.pack("<i", len(entries)) + b"".join(
+        struct.pack("<7i", *entry) for entry in entries)
+    # key 0 resolves to the shipped bundle, key 1 to the remote one
+    bucket_blob = (struct.pack("<i", 2) + struct.pack("<2i", 0, 1) + struct.pack("<i", 0)
+                   + struct.pack("<2i", 0, 1) + struct.pack("<i", 1))
+    catalog = {"m_InternalIds": ids, "m_InternalIdPrefixes": [],
+               "m_EntryDataString": base64.b64encode(entry_blob).decode(),
+               "m_BucketDataString": base64.b64encode(bucket_blob).decode()}
+    with tempfile.TemporaryDirectory() as tmp:
+        aa = Path(tmp) / "assets" / "aa"
+        (aa / "Android").mkdir(parents=True)
+        (aa / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+        (aa / "Android" / "ui_shop_assets_all_aaa.bundle").write_bytes(b"UnityFS")
+        found = read_catalog(aa / "catalog.json", Path(tmp))
+    bundles = {bundle["group"]: bundle for bundle in found["bundles"]}
+    check("a bundle under the runtime path is local and in the package",
+          (bundles["ui_shop"]["location"], bundles["ui_shop"]["shipped"]), ("local", True))
+    check("a bundle behind an address is remote and not in the package",
+          (bundles["remotegroup"]["location"], bundles["remotegroup"]["shipped"]),
+          ("remote", False))
+    check("an entry that needs a missing bundle is named, one that does not is not",
+          found["unreachable"], ["Assets/Art/Bg.png"])
+    check("no address is written into the report",
+          "cdn.example" in json.dumps(found), False)
+
+
+def type_checks() -> None:
+    """A serialized object's own header types it; its folder does not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        lighting = root / "Scenes" / "Game" / "LightingData.asset"
+        lighting.parent.mkdir(parents=True)
+        lighting.write_bytes(bytes(16) + b"binary serialized file")
+        check("an object the header cannot place is not typed by its folder",
+              infer_type(Path("Scenes/Game/LightingData.asset"), lighting),
+              "SerializedAsset")
+        icon = root / "Sprite" / "icon.asset"
+        icon.parent.mkdir()
+        icon.write_text(chr(10).join(["%YAML 1.1", "--- !u!213 &21300000", "Sprite:", ""]),
+                        encoding="utf-8")
+        check("its header still types it", infer_type(Path("Sprite/icon.asset"), icon),
+              "Sprite")
+
+
+def bundle_reach_checks() -> None:
+    """A bundle's label reaches the contents of what its manifest names."""
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = connect(Path(tmp) / "t.db")
+        for guid, name, kind, ext in (
+                ("g_dialog", "ShopDialog", "Prefab", "prefab"),
+                ("g_tex", "shop_bg", "Texture2D", "png"),
+                ("g_page", "sactx-0-1024x1024-ASTC 6x6-ShopAtlas-abc12345", "Texture2D",
+                 "png"),
+                ("g_sprite", "shop_button", "Sprite", "asset"),
+                ("g_other", "unrelated", "Sprite", "asset")):
+            conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext) "
+                         "VALUES (?, ?, ?, ?, ?)", (guid, f"{name}.{ext}", name, kind, ext))
+        conn.execute("INSERT INTO refs VALUES ('g_dialog', 'g_tex')")
+        sprite_id = conn.execute(
+            "SELECT id FROM assets WHERE guid = 'g_sprite'").fetchone()[0]
+        conn.execute("INSERT INTO sprites (asset_id, atlas_guid, x, y, w, h) "
+                     "VALUES (?, 'g_page', 0, 0, 10, 10)", (sprite_id,))
+        reached = bundle_reach(conn, {
+            "shopdialog": ("b1", "Assets/Game/UI/Shop/ShopDialog.prefab"),
+            "shopatlas": ("b2", "Assets/Game/UI/Shop/ShopAtlas.spriteatlas")})
+        conn.close()
+    check("a bundle's label reaches what its container references",
+          reached.get("g_tex", (None,))[0], "b1")
+    check("and every sprite on the pages of an atlas it names",
+          reached.get("g_sprite", (None,))[0], "b2")
+    check("but not what it does not reach", "g_other" in reached, False)
+    check("and nothing at all without a bundle map", bundle_reach(None, {}), {})
+
+
 def ripper_checks() -> None:
     """The primary content pass asks AssetRipper for that export, and its records are read."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -1175,6 +1263,9 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     scriptable_corpus_checks()
     object_checks()
     spine_checks()
+    addressables_checks()
+    type_checks()
+    bundle_reach_checks()
     spine_catalogue_checks()
     index_rerun_checks()
     thumbnail_checks()

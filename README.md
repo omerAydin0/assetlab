@@ -301,6 +301,26 @@ up half `Unknown`. Sources are consulted strongest first:
 
 Across five builds this leaves 0.0–0.1% unclassified.
 
+### What is left unlabelled
+
+An image nothing places is left unplaced. Classification used to call it UI and file the
+guess as filename evidence, so a catalogue read as fully classified while up to half of
+one build's art had no evidence behind its label at all — 1,125 of 2,064 images in one
+build, 845 of 3,682 in another. Unknown is an honest answer; a guess presented as a
+finding is not. `doctor` reports the share instead of hiding it.
+
+Most of what is left is art loaded at run time by an Addressables address, which no
+scene or prefab references, so the asset graph cannot reach it. Bundle provenance can.
+An AssetRipper *Primary Content* export records each bundle's entries in `m_Container`,
+and passing it as `--primary-content` labels them — but a manifest names only a
+bundle's top-level entries, an atlas or a dialog prefab, so matching by name labelled 207
+assets in one build and none of the 845 sprites inside them. The label is now carried
+down two edges: the GUID references the graph already holds, and the page a sprite was
+packed on. Unity names a SpriteAtlas's pages `sactx-<page>-<size>-<format>-<AtlasName>-<hash>`,
+so an atlas the manifest names reaches every sprite on its pages even though the atlas
+asset itself is not in the export. Carried labels are `medium` confidence; named ones
+stay `high`.
+
 ### Boosters, obstacles and other mechanics
 
 Where a build's scripts decompile to C#, the design vocabulary is written down in
@@ -532,6 +552,26 @@ Two mistakes on the way, both caught by measuring rather than by looking:
   candidates — and where nothing matches, the regions are refused rather than cut from
   the wrong picture. That is 246 regions across two builds now honestly reported
   instead of 85 silently wrong ones.
+
+### What the package does not hold
+
+A build that loads through Addressables ships its catalogue in `assets/aa/catalog.json`,
+listing every bundle the game will ask for. Some are in the package; others sit behind an
+address and are fetched at run time, and a library built from the package cannot include
+them. `assetlab/addressables.py` decodes the catalogue — its entry blob is seven int32
+fields per entry, and each entry's dependency key resolves through the bucket blob to the
+bundles it needs — and writes `addressables.json`: every bundle declared, whether it is
+local or remote, whether the package holds it, and which entries depend on one it does
+not. One build declares nineteen bundles and ships fifteen; the four it lacks hold two
+live events and eight gameplay backgrounds, twenty-two entries in all. The pipeline
+writes the report after discovery and `doctor` states it.
+
+It never follows an address. Remote bundles are named by file, no address is written into
+the report, and what is not in the package is outside what this tool reads.
+
+```bash
+python -m assetlab.addressables --package <unpacked package> --out out/<name>
+```
 
 ### When a build's sprites cannot be placed at all
 

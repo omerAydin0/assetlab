@@ -591,6 +591,66 @@ def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
     return mapping
 
 
+#: How far a bundle's label is carried down from the asset its manifest names. Measured
+#: on one build: four steps reach 546 of the 845 sprites nothing else labels, and the
+#: count had stopped rising at five.
+BUNDLE_DEPTH = 4
+
+
+def bundle_reach(conn: sqlite3.Connection,
+                 bundle_map: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+    """Carry each bundle's container path from the assets it names to what they use.
+
+    A bundle manifest names only its top-level entries - an atlas, a dialog prefab - so
+    matching by name labels the container and none of its contents. On one build that
+    tagged 207 assets and left every one of the 845 unlabelled sprites unlabelled.
+
+    Two edges carry the label down. One is the GUID references the asset graph already
+    holds. The other is the page a sprite was packed on: Unity names a SpriteAtlas's
+    pages `sactx-<page>-<size>-<format>-<AtlasName>-<hash>`, so an atlas the manifest
+    names reaches every sprite on its pages even though the atlas asset itself is not in
+    the export. That is Unity's naming, not a studio's. The nearest root wins, so an
+    asset two bundles both reach takes the label of the one that holds it most directly.
+    """
+    if not bundle_map:
+        return {}
+    labels: dict[str, tuple[str, str]] = {}
+    for row in conn.execute("SELECT guid, name FROM assets WHERE guid IS NOT NULL"):
+        hit = bundle_map.get((row["name"] or "").lower())
+        if hit:
+            labels[row["guid"]] = hit
+    atlases = {stem: value for stem, value in bundle_map.items()
+               if value[1].lower().endswith(".spriteatlas")}
+    if atlases:
+        for row in conn.execute(
+                "SELECT guid, name FROM assets WHERE unity_type='Texture2D' "
+                "AND name LIKE 'sactx-%' AND guid IS NOT NULL"):
+            lowered = row["name"].lower()
+            for stem, value in atlases.items():
+                if f"-{stem}-" in lowered:
+                    labels.setdefault(row["guid"], value)
+                    break
+
+    below: dict[str, list[str]] = defaultdict(list)
+    for src, dst in conn.execute("SELECT src_guid, dst_guid FROM refs"):
+        below[src].append(dst)
+    for guid, page in conn.execute(
+            "SELECT a.guid, s.atlas_guid FROM sprites s JOIN assets a ON a.id = s.asset_id "
+            "WHERE a.guid IS NOT NULL AND s.atlas_guid IS NOT NULL"):
+        below[page].append(guid)
+
+    queue = deque((guid, 0) for guid in labels)
+    while queue:
+        guid, depth = queue.popleft()
+        if depth >= BUNDLE_DEPTH:
+            continue
+        for child in below.get(guid, ()):
+            if child not in labels:
+                labels[child] = labels[guid]
+                queue.append((child, depth + 1))
+    return labels
+
+
 def feature_from_container_path(project_path: str) -> str | None:
     """`Assets/_Studio/LiveOps/SummerEvent/Assets/x.spriteatlas` -> 'SummerEvent'."""
     skip = {"assets", "prefab", "prefabs", "sprites", "textures", "materials",
@@ -788,6 +848,10 @@ def classify(assets_root: Path, primary_content: Path | None,
               f"{len(from_code['Obstacle'])} obstacles")
     holder_roles = scan_prefab_roles(assets_root, conn)
     inherited, usage = propagate(conn, holder_roles)
+    carried = bundle_reach(conn, bundle_map)
+    if bundle_map:
+        print(f"  bundle provenance: {len(bundle_map)} container entries, carried to "
+              f"{len(carried)} assets")
     vocabulary = {**families, **boosters}
     mechanic_by_graph = mechanics_from_holders(usage, vocabulary)
 
@@ -812,16 +876,22 @@ def classify(assets_root: Path, primary_content: Path | None,
             if group:
                 add(tags, asset_id, "group", group, "high", "project_dir")
 
-        # 2. Addressables bundle provenance
+        # 2. Addressables bundle provenance: named by the manifest, or carried down to
+        #    it from an asset the manifest names.
         bundle_role: str | None = None
+        bundle_confidence = "high"
         entry = bundle_map.get(lowered)
+        if not entry and guid:
+            entry = carried.get(guid)
+            bundle_confidence = "medium"
         if entry:
             bundle, project_path = entry
-            add(tags, asset_id, "bundle", bundle, "high", "bundle")
-            add(tags, asset_id, "container_path", project_path, "high", "bundle")
+            add(tags, asset_id, "bundle", bundle, bundle_confidence, "bundle")
+            add(tags, asset_id, "container_path", project_path, bundle_confidence, "bundle")
             container_feature = feature_from_container_path(project_path)
             if container_feature:
-                add(tags, asset_id, "feature", container_feature, "high", "bundle")
+                add(tags, asset_id, "feature", container_feature, bundle_confidence,
+                    "bundle")
                 primary_feature = primary_feature or container_feature
             lowered_path = project_path.lower()
             if "/ui/" in lowered_path or "/liveops/" in lowered_path:
@@ -892,15 +962,17 @@ def classify(assets_root: Path, primary_content: Path | None,
             role = holder_roles[guid][0]
         elif bundle_role:
             role = bundle_role
-            add(tags, asset_id, "role", role, "high", "bundle")
+            add(tags, asset_id, "role", role, bundle_confidence, "bundle")
         elif guid and guid in inherited:
             ordered = [value for value in ROLE_PRIORITY if value in inherited[guid]]
             for value in ordered:
                 add(tags, asset_id, "role", value, "medium", "graph")
             role = ordered[0] if ordered else None
-        if role is None and unity_type in {"Sprite", "Texture2D"}:
-            role = "UI"
-            add(tags, asset_id, "role", role, "low", "filename")
+        # An image nothing else placed is left unplaced. This used to call it UI and
+        # file the guess as filename evidence, which made a catalogue read as fully
+        # classified while up to half of one build's art had no evidence behind its
+        # label at all. Unknown is an honest answer; a guess presented as a finding
+        # is not.
         if role is None and (row["ext"] or "").lower() in {"json", "xml", "csv", "tsv", "txt"}:
             # Catalogs indexed before loose data files were typed still land here.
             role = "Data"

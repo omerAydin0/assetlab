@@ -292,6 +292,13 @@ def infer_type(rel: Path, path: Path | None = None) -> str:
         declared = class_id_type(path)
         if declared:
             return declared
+        # A serialized object says what it is in its own header, and the folder it sits
+        # in cannot overrule that. Scene folders hold LightingData.asset and
+        # LightProbes.asset beside the scenes; taking the folder's word typed twenty of
+        # them "Scene" across six builds. One the header read cannot place stays
+        # unplaced, which is what it is.
+        if path.is_file():
+            return "SerializedAsset"
     # Fall back to the folder the asset sits in.
     for part in rel.parts[:-1]:
         mapped = FOLDER_TYPE.get(part.lower())

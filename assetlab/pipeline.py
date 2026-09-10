@@ -154,6 +154,16 @@ def run_pipeline(input_path: Path, out: Path, title: str,
                           "; ".join(manifest["errors"]) if manifest.get("errors") else detail,
                           time.time() - started))
     split_reports(manifest, out)
+    # What the package's Addressables catalogue declares against what it ships. Read
+    # from the staged files only: a bundle behind an address is named, never fetched.
+    from .addressables import describe, write_report
+    try:
+        declared = write_report(staged_tree(staging, manifest) or staging, out)
+    except OSError as problem:
+        declared = None
+        print(f"[discovery] Addressables catalogue not read: {problem}")
+    if declared:
+        print(f"[discovery] Addressables: {describe(declared)}")
 
     unity = manifest.get("unity") or {}
     shape = manifest.get("packaging") or {}

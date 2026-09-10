@@ -499,12 +499,71 @@ def diagnose_levels(export: Path, files: list[Path] | None = None) -> list[Check
 OUTCOME_METRICS = {
     "mechanics": ("SELECT COUNT(DISTINCT value) FROM tags WHERE kind='mechanic'", 1),
     "features": ("SELECT COUNT(DISTINCT value) FROM tags WHERE kind='feature'", 1),
-    "sprites per asset": ("SELECT COUNT(*) FROM sprites", "assets"),
+    "sprites per asset": ("SELECT COUNT(*) FROM sprites s "
+                          "JOIN assets a ON a.id = s.asset_id", "assets"),
     "refs per asset": ("SELECT COUNT(*) FROM refs", "assets"),
-    "clips per asset": ("SELECT COUNT(*) FROM animations", "assets"),
+    "clips per asset": ("SELECT COUNT(*) FROM animations n "
+                        "JOIN assets a ON a.id = n.asset_id", "assets"),
     "classified share": ("""SELECT COUNT(DISTINCT asset_id) FROM tags
                              WHERE kind IN ('category','mechanic','feature')""", "assets"),
 }
+
+
+#: Every table whose rows name an asset by id.
+ASSET_CHILDREN = ("sprites", "tags", "used_by", "animations", "piece_groups")
+
+
+def orphan_rows(database: Path) -> dict[str, int]:
+    """Rows that point at an asset id the catalogue no longer holds, per table.
+
+    A stage that renumbered its assets on a re-run left these behind, and nothing read
+    them as wrong: every join dropped them silently, and every count did not.
+    """
+    found: dict[str, int] = {}
+    if not database.is_file():
+        return found
+    conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        have = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table in ASSET_CHILDREN:
+            if table not in have:
+                continue
+            count = conn.execute(
+                f"SELECT COUNT(*) FROM {table} x LEFT JOIN assets a ON a.id = x.asset_id "
+                f"WHERE a.id IS NULL").fetchone()[0]
+            if count:
+                found[table] = count
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return found
+
+
+def prune_orphans(database: Path) -> dict[str, int]:
+    """Delete the rows `orphan_rows` finds. -> how many went, per table.
+
+    The one thing `doctor` writes, and only when asked: the rows name nothing, every
+    join already ignores them, and removing them changes no answer except the counts
+    they were inflating.
+    """
+    removed: dict[str, int] = {}
+    conn = sqlite3.connect(database)
+    try:
+        have = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table in ASSET_CHILDREN:
+            if table in have:
+                gone = conn.execute(
+                    f"DELETE FROM {table} WHERE asset_id NOT IN (SELECT id FROM assets)"
+                ).rowcount
+                if gone:
+                    removed[table] = gone
+        conn.commit()
+    finally:
+        conn.close()
+    return removed
 
 
 def catalogue_metrics(database: Path) -> dict[str, float] | None:
@@ -526,7 +585,11 @@ def catalogue_metrics(database: Path) -> dict[str, float] | None:
         found = {"assets": assets,
                  "sprite_assets": scalar(
                      "SELECT COUNT(*) FROM assets WHERE unity_type='Sprite'"),
-                 "sprite_rects": scalar("SELECT COUNT(*) FROM sprites")}
+                 # Joined, so a rect left behind by a renumbered asset is not
+                 # counted as a sprite placed - it read as 2.00 placed per sprite.
+                 "sprite_rects": scalar(
+                     "SELECT COUNT(*) FROM sprites s JOIN assets a ON a.id = s.asset_id "
+                     "WHERE a.unity_type = 'Sprite'")}
         for name, (sql, divisor) in OUTCOME_METRICS.items():
             found[name] = scalar(sql) / (assets if divisor == "assets" else 1)
         return found
@@ -571,6 +634,74 @@ def diagnose_outcome(out: Path, peers: list[Path] | None = None) -> Diagnosis:
         else:
             result.add(OK, f"{mechanics:.0f} mechanics against {features:.0f} features "
                            f"({ratio:.3f}) - vocabulary is self-consistent")
+
+    # Reported, not asserted: what the package's Addressables catalogue declares that
+    # the package does not ship. The library covers the files it was given; this says
+    # how much of the game that is.
+    declared_path = out / "addressables.json"
+    if declared_path.is_file():
+        from .addressables import describe
+        try:
+            summary = json.loads(declared_path.read_text(encoding="utf-8"))["summary"]
+        except (OSError, ValueError, KeyError):
+            summary = None
+        if summary and (summary["remote"] or summary["local_missing"]):
+            result.add(WARN, describe(summary),
+                       "those bundles are fetched at run time and are not in the files "
+                       "this was built from, so the library does not include them. "
+                       "addressables.json lists the entries that depend on them.")
+        elif summary:
+            result.add(OK, describe(summary))
+        if summary and summary.get("binary_catalogs"):
+            result.add(WARN, f"{summary['binary_catalogs']} binary Addressables "
+                             f"catalogue(s) not read", "only the JSON format is decoded")
+
+    # Also reported, not asserted: art that no evidence places. It is left unlabelled
+    # rather than guessed, so the share is the honest size of what is still unknown.
+    visual = placed = carried = 0
+    database = out / "assetlab.db"
+    if database.is_file():
+        conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        # Closed on every path: a catalogue missing a table raises mid-read, and a
+        # connection left open holds the file locked on Windows.
+        try:
+            visual = conn.execute(
+                "SELECT COUNT(*) FROM assets WHERE image_path IS NOT NULL").fetchone()[0]
+            placed = conn.execute(
+                "SELECT COUNT(DISTINCT t.asset_id) FROM tags t "
+                "JOIN assets a ON a.id = t.asset_id "
+                "WHERE t.kind = 'role' AND a.image_path IS NOT NULL").fetchone()[0]
+            carried = conn.execute(
+                "SELECT COUNT(DISTINCT asset_id) FROM tags "
+                "WHERE source = 'bundle'").fetchone()[0]
+        except sqlite3.Error:
+            visual = 0
+        finally:
+            conn.close()
+    if visual:
+        open_share = (visual - placed) / visual
+        advice = ("" if carried else
+                  " No bundle provenance was available: an AssetRipper Primary Content "
+                  "export passed as --primary-content labels art that is loaded at run "
+                  "time and so has no static reference.")
+        result.add(OK if open_share < 0.25 else WARN,
+                   f"{visual - placed:.0f} of {visual:.0f} images carry no role evidence "
+                   f"({open_share:.2f}) and are left unlabelled rather than guessed",
+                   advice.strip() or None)
+
+    # Integrity: rows naming an asset the catalogue no longer holds.
+    stale = orphan_rows(out / "assetlab.db")
+    if stale:
+        result.add(WARN,
+                   "rows pointing at assets that no longer exist: " +
+                   ", ".join(f"{table} {count}" for table, count in stale.items()),
+                   "left by a stage that renumbered its assets on a re-run. Joins ignore "
+                   "them but counts do not - an atlas caption read them as packed "
+                   "sprites. Clear them with python -m assetlab.doctor --prune-orphans "
+                   f"--catalogue {out}",
+                   blocking=False)
+    else:
+        result.add(OK, "every row that names an asset names one the catalogue holds")
 
     # The second assertion: art the build ships that the catalogue could not place.
     declared, placed = mine.get("sprite_assets", 0), mine.get("sprite_rects", 0)
@@ -723,6 +854,9 @@ def main() -> None:
     parser.add_argument("--primary-content", type=Path, default=None)
     parser.add_argument("--catalogue", type=Path, default=None,
                         help="a finished out/<name> directory, compared with its peers")
+    parser.add_argument("--prune-orphans", action="store_true",
+                        help="delete rows that name an asset the catalogue no longer "
+                             "holds (needs --catalogue); the only thing doctor writes")
     parser.add_argument("--all", action="store_true",
                         help="re-run every gate over every catalogue on disk, as a "
                              "regression over builds that share no packaging")
@@ -732,6 +866,13 @@ def main() -> None:
     parser.add_argument("--json", type=Path, default=None,
                         help="also write the diagnosis here as JSON")
     args = parser.parse_args()
+    if args.prune_orphans:
+        if not args.catalogue:
+            parser.error("--prune-orphans needs --catalogue")
+        removed = prune_orphans(args.catalogue / "assetlab.db")
+        print("pruned: " + (", ".join(f"{table} {count}" for table, count in removed.items())
+                            or "nothing to prune"))
+        return
 
     if args.all:
         rows = survey(args.out_root.resolve(), args.staging_root.resolve(),
