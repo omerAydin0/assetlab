@@ -792,6 +792,15 @@ def index_rerun_checks() -> None:
             moved = dict(conn.execute("SELECT rel_path, id FROM assets"))
         except sqlite3.IntegrityError as error:
             moved = str(error)
+        # Two files still in the export trade guids; each path keeps its own row.
+        (root / "TextAsset" / "notes.txt.meta").write_text(f"guid: {'b' * 32}\n")
+        (root / "TextAsset" / "other_0.txt.meta").write_text(f"guid: {'a' * 32}\n")
+        try:
+            build_index(root, conn)
+            swapped = [tuple(row) for row in conn.execute(
+                "SELECT rel_path, id, guid FROM assets ORDER BY rel_path")]
+        except sqlite3.IntegrityError as error:
+            swapped = str(error)
         conn.close()          # Windows will not remove a directory it still holds
     check("a second index keeps every asset's id", after, ids)
     check("so a label written against it still finds it", labelled,
@@ -800,6 +809,9 @@ def index_rerun_checks() -> None:
     check("a file that moved keeps its id under its new path", moved,
           {"TextAsset/notes.txt": ids["TextAsset/notes.txt"],
            "TextAsset/other_0.txt": ids["TextAsset/other.txt"]})
+    check("two files that trade guids each keep their own id", swapped,
+          [("TextAsset/notes.txt", ids["TextAsset/notes.txt"], "b" * 32),
+           ("TextAsset/other_0.txt", ids["TextAsset/other.txt"], "a" * 32)])
 
 
 def spine_catalogue_checks() -> None:

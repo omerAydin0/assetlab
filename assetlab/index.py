@@ -120,6 +120,16 @@ def build_index(assets_root: Path, conn: sqlite3.Connection) -> tuple[int, int]:
         if number % 500 == 0:
             print(f"  indexed {number}/{len(files)}", flush=True)
 
+    # Two files still in the export can trade guids between exports. Each path keeps
+    # its own row, so a guid about to be claimed by another path is released first;
+    # otherwise the update handing it over would find it still held and stop.
+    claimed = {row["guid"]: row["rel_path"] for row in rows if row["guid"]}
+    present = {row["rel_path"] for row in rows}
+    conn.executemany(
+        "UPDATE assets SET guid = NULL WHERE guid = ?",
+        [(guid,) for guid, path in conn.execute(
+            "SELECT guid, rel_path FROM assets WHERE guid IS NOT NULL")
+         if guid in claimed and claimed[guid] != path and path in present])
     # Updated in place rather than replaced. `INSERT OR REPLACE` deletes the row and
     # inserts a new one, which hands every asset a new id and orphans the tags,
     # sprites, used_by, animations and piece_groups written against the old - on
