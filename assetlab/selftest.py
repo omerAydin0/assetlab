@@ -763,6 +763,7 @@ bounds:10,20,30,40
 
 def index_rerun_checks() -> None:
     """Indexing the same export twice keeps every asset's id, so its labels hold."""
+    import sqlite3
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "Assets"
         (root / "TextAsset").mkdir(parents=True)
@@ -782,11 +783,23 @@ def index_rerun_checks() -> None:
             "SELECT a.rel_path FROM tags t JOIN assets a ON a.id = t.asset_id")]
         size = conn.execute("SELECT size_bytes FROM assets WHERE rel_path = "
                             "'TextAsset/notes.txt'").fetchone()[0]
+        # A file renamed between exports keeps its guid and arrives under a new path.
+        (root / "TextAsset" / "other.txt").rename(root / "TextAsset" / "other_0.txt")
+        (root / "TextAsset" / "other.txt.meta").rename(
+            root / "TextAsset" / "other_0.txt.meta")
+        try:
+            build_index(root, conn)
+            moved = dict(conn.execute("SELECT rel_path, id FROM assets"))
+        except sqlite3.IntegrityError as error:
+            moved = str(error)
         conn.close()          # Windows will not remove a directory it still holds
     check("a second index keeps every asset's id", after, ids)
     check("so a label written against it still finds it", labelled,
           ["TextAsset/notes.txt"])
     check("and the row itself is brought up to date", size, len("notes, edited"))
+    check("a file that moved keeps its id under its new path", moved,
+          {"TextAsset/notes.txt": ids["TextAsset/notes.txt"],
+           "TextAsset/other_0.txt": ids["TextAsset/other.txt"]})
 
 
 def spine_catalogue_checks() -> None:

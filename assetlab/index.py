@@ -123,7 +123,9 @@ def build_index(assets_root: Path, conn: sqlite3.Connection) -> tuple[int, int]:
     # Updated in place rather than replaced. `INSERT OR REPLACE` deletes the row and
     # inserts a new one, which hands every asset a new id and orphans the tags,
     # sprites, used_by, animations and piece_groups written against the old - on
-    # every re-run of this stage.
+    # every re-run of this stage. A file that moved between exports keeps its guid
+    # and arrives under a new path; the guid is what says it is the same asset, so
+    # the row it already has is moved to the new path rather than refused.
     conn.executemany(
         """INSERT INTO assets
            (guid, rel_path, name, unity_type, ext, size_bytes, width, height,
@@ -136,6 +138,16 @@ def build_index(assets_root: Path, conn: sqlite3.Connection) -> tuple[int, int]:
            ON CONFLICT(rel_path) DO UPDATE SET
              guid=excluded.guid, name=excluded.name, unity_type=excluded.unity_type,
              ext=excluded.ext, size_bytes=excluded.size_bytes, width=excluded.width,
+             height=excluded.height, has_alpha=excluded.has_alpha,
+             alpha_ratio=excluded.alpha_ratio, is_grayscale=excluded.is_grayscale,
+             dominant_hex=excluded.dominant_hex, sha256=excluded.sha256,
+             dhash=excluded.dhash, duration_seconds=excluded.duration_seconds,
+             sample_rate=excluded.sample_rate, channels=excluded.channels,
+             audio_codec=excluded.audio_codec, image_path=excluded.image_path
+           ON CONFLICT(guid) DO UPDATE SET
+             rel_path=excluded.rel_path, name=excluded.name,
+             unity_type=excluded.unity_type, ext=excluded.ext,
+             size_bytes=excluded.size_bytes, width=excluded.width,
              height=excluded.height, has_alpha=excluded.has_alpha,
              alpha_ratio=excluded.alpha_ratio, is_grayscale=excluded.is_grayscale,
              dominant_hex=excluded.dominant_hex, sha256=excluded.sha256,
