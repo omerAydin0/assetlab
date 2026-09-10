@@ -92,8 +92,9 @@ function atlasSection(o){
         so there is no layout to draw.`);
     if (page.ac <= cuts.length && cuts.every(d => { const [x, y, w, h] = box(d);
           return x === 0 && y === 0 && w === page.w && h === page.h; }))
-      return note(`${cuts.length === 1 ? "This piece is" : "These pieces are"} shipped
-        as their own texture rather than packed onto a shared sheet.`);
+      return note(cuts.length === 1
+        ? "This piece is its own texture rather than a cut from a shared sheet."
+        : "These pieces are each the whole of one texture rather than cuts from a shared sheet.");
     // Only the copy made beside the catalogue is drawn on. The full texture is a
     // file:// path a served page cannot load, and the square thumbnail next to it is
     // padded, so outlines over either would land somewhere they are not.

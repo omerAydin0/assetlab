@@ -14,7 +14,8 @@ from pathlib import Path
 from PIL import Image
 
 from .addressables import read_catalog
-from .animations import parse_clip, parse_prefab_rig, quaternion_z_degrees
+from .animations import (parse_clip, parse_prefab_rig, parse_transform_curves,
+                         prefab_animators, quaternion_z_degrees)
 from .classify import (bundle_reach, feature_from_project_dir,
                        feature_from_container_path, match_vocabulary,
                        mechanics_from_holders)
@@ -850,6 +851,146 @@ def spine_catalogue_checks() -> None:
         conn.close()          # Windows will not remove a directory it still holds
 
 
+ANIMATOR_PREFAB = """%YAML 1.1
+--- !u!1 &100
+GameObject:
+  m_Name: Page
+--- !u!4 &400
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalPosition: {x: -28, y: -12, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 401}
+  - {fileID: 402}
+  m_Father: {fileID: 0}
+--- !u!111 &111000
+Animation:
+  m_GameObject: {fileID: 100}
+  m_Animation: {fileID: 7400000, guid: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee, type: 2}
+--- !u!1 &101
+GameObject:
+  m_Name: Elephant
+--- !u!4 &401
+Transform:
+  m_GameObject: {fileID: 101}
+  m_LocalPosition: {x: 2, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+--- !u!95 &95001
+Animator:
+  m_GameObject: {fileID: 101}
+  m_Controller: {fileID: 9100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!212 &212001
+SpriteRenderer:
+  m_GameObject: {fileID: 101}
+  m_Enabled: 1
+  m_Sprite: {fileID: 21300000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+--- !u!1 &102
+GameObject:
+  m_Name: Patch
+--- !u!4 &402
+Transform:
+  m_GameObject: {fileID: 102}
+  m_LocalPosition: {x: 0, y: -5, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+--- !u!212 &212002
+SpriteRenderer:
+  m_GameObject: {fileID: 102}
+  m_Enabled: 1
+  m_Sprite: {fileID: 21300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+"""
+
+# A clip that sways the object its Animator is on: its curves have the empty path.
+ANIMATOR_CLIP = """%YAML 1.1
+--- !u!74 &7400000
+AnimationClip:
+  m_Name: Sway
+  m_EulerCurves:
+  - curve:
+      serializedVersion: 2
+      m_Curve:
+      - serializedVersion: 3
+        time: 0
+        value: {x: 0, y: 0, z: 0}
+      - serializedVersion: 3
+        time: 1
+        value: {x: 0, y: 0, z: 10}
+    path:
+  m_PositionCurves: []
+  m_SampleRate: 60
+"""
+
+
+def animator_binding_checks() -> None:
+    """A clip moves the object its Animator is on, and draws only what is under it."""
+    import json
+    from . import animations
+    check("each animating component is found where it sits",
+          sorted(prefab_animators(ANIMATOR_PREFAB)),
+          [("", {"e" * 32}), ("Elephant", {"c" * 32})])
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Page.prefab").write_text(ANIMATOR_PREFAB, encoding="utf-8")
+        (root / "Sway.anim").write_text(ANIMATOR_CLIP, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            for guid, path, kind, ext, size in (
+                    ("a" * 32, "elephant.asset", "Sprite", "asset", (62, 88)),
+                    ("b" * 32, "patch.asset", "Sprite", "asset", (1024, 8)),
+                    ("f" * 32, "Sway.anim", "AnimationClip", "anim", (None, None)),
+                    ("c" * 32, "Sway.controller", "AnimatorController", "controller",
+                     (None, None)),
+                    ("9" * 32, "Page.prefab", "Prefab", "prefab", (None, None))):
+                image = f"sprites/{path}.png" if kind == "Sprite" else None
+                conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext, "
+                             "width, height, image_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                             (guid, path, path.split(".")[0], kind, ext, *size, image))
+            ids = dict(conn.execute("SELECT guid, id FROM assets").fetchall())
+            for guid in ("a" * 32, "b" * 32):
+                conn.execute("INSERT INTO sprites (asset_id, ppu, anchor_x, anchor_y) "
+                             "VALUES (?, 100, 0.5, 0.5)", (ids[guid],))
+            conn.execute("INSERT INTO refs VALUES (?, ?)", ("c" * 32, "f" * 32))
+            conn.execute("INSERT INTO used_by VALUES (?, ?, 'Page', 'Prefab')",
+                         (ids["f" * 32], "9" * 32))
+            conn.commit()
+            stats = animations.build(root, conn)
+            layers, nodes = (json.loads(v) for v in conn.execute(
+                "SELECT layers, nodes FROM animations WHERE asset_id = ?",
+                (ids["f" * 32],)).fetchone())
+        finally:
+            conn.close()          # Windows will not remove a directory it still holds
+    check("a clip draws only the art under the Animator that plays it",
+          [layer["name"] for layer in layers], ["Elephant"])
+    check("curves on the Animator's own object move that object",
+          "rot" in nodes[layers[0]["chain"][-1]], True)
+    check("and leave the prefab root where it is",
+          "rot" in nodes[layers[0]["chain"][0]], False)
+    check("the clip was bound through its Animator, not guessed",
+          (stats["bound"], stats["guessed"]), (1, 0))
+
+
+def rotation_unwrap_checks() -> None:
+    """A quaternion turn past half a turn keeps going instead of spinning back."""
+    text = chr(10).join([
+        "  m_RotationCurves:",
+        "  - curve:",
+        "      serializedVersion: 2",
+        "      m_Curve:",
+        "      - serializedVersion: 3",
+        "        time: 0",
+        "        value: {x: 0, y: 0, z: 0.9961947, w: 0.0871557}",
+        "      - serializedVersion: 3",
+        "        time: 1",
+        "        value: {x: 0, y: 0, z: 0.9961947, w: -0.0871557}",
+        "    path: Arm",
+        "  m_CompressedRotationCurves: []", ""])
+    keys = parse_transform_curves(text)["Arm"]["euler"]
+    check("a turn from 170 to 190 degrees is not read as a turn back to -170",
+          [round(key[3]) for key in keys], [170, 190])
+
+
 def addressables_checks() -> None:
     """What a catalogue declares, against what the package it ships in holds."""
     import base64
@@ -1271,6 +1412,8 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     corpus_checks()
     scriptable_corpus_checks()
     object_checks()
+    animator_binding_checks()
+    rotation_unwrap_checks()
     spine_checks()
     addressables_checks()
     type_checks()

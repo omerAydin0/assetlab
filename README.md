@@ -359,15 +359,29 @@ being right about the geometry:
   `m_Color` renders a black 95%-opacity dimmer as an opaque white slab.
 - **SpriteMask**, resolved from the nearest mask above or beside a renderer, so a reel
   far larger than the window it shows through gets clipped.
-- **Animator-root scoping** — a clip only draws art beneath its own animator root.
-  Without it a prefab's neighbours bleed into the picture.
+- **Animator-root scoping** — a clip's paths are relative to the object its Animator
+  is on, and a clip draws only the art beneath that object. The object is read, not
+  guessed: an Animator names its controller and a controller the clips it plays, so
+  each clip is bound to the Animator that plays it. 1,739 of the 1,856 Animators in
+  these builds sit below the prefab root. Guessing the root from the clip's path names,
+  as this once did, failed whenever a clip drove the Animator's own object (the empty
+  path) or siblings shared names — an elephant's sway then rocked the whole map page it
+  stands on, strip of ground and all. Name matching is left for a prefab whose Animator
+  is not in its own file, which is 11 clips.
 
 Motion is sampled linearly between keyframes; Unity eases with bezier tangents, so
-this is an approximation. Additive blending, shaders and particle systems are not
-reproduced.
+this is an approximation. A rotation stored as quaternions is unwrapped, so a turn past
+half a turn keeps going instead of spinning back the long way. Additive blending,
+shaders and particle systems are not reproduced.
 
-Across five builds: 3,548 clips, of which 384 are sprite-swap sequences and 1,955
-compose into rigs totalling 36,235 layers.
+The preview camera holds still while a clip plays. Re-centring on the rig every frame
+cancelled the motion it was there to show — a bounce became a wobble in place — and
+let one part flung off, or parked out of sight, swing the whole picture: the frame moved
+by more than 5% of the rig's size in 907 of 2,009 clips. Only a rig whose parts travel
+further than its own size is followed, and then by where most of its parts are.
+
+Across five builds: 5,326 clips, of which 379 are sprite-swap sequences and 2,009
+compose into rigs totalling 35,080 layers.
 
 ### Objects
 

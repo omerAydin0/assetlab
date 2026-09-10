@@ -84,6 +84,15 @@ def parse_transform_curves(text: str) -> dict[str, dict[str, list]]:
                 for t, x, y, z, w in QUAT_KEY_RE.findall(chunk)]
         if not keys:
             continue
+        # An angle read off a quaternion lies in (-180, 180], so a part turning past
+        # half a turn jumps from 179 to -179 between two keys, and interpolating
+        # that spins it the long way round. Each key takes the turn nearest the last.
+        for previous, key in zip(keys, keys[1:]):
+            while key[3] - previous[3] > 180:
+                key[3] -= 360
+            while key[3] - previous[3] < -180:
+                key[3] += 360
+            key[3] = round(key[3], 3)
         path = PATH_RE.search(chunk)
         tracks.setdefault((path.group(1) if path else "").strip(), {}).setdefault(
             "euler", keys)
@@ -341,6 +350,77 @@ def parse_prefab_rig(text: str) -> list[dict]:
     return records
 
 
+CONTROLLER_REF_RE = re.compile(
+    r"^  m_Controller:\s*\{fileID:\s*-?\d+,\s*guid:\s*([0-9a-f]{32})", re.M)
+GUID_REF_RE = re.compile(r"guid:\s*([0-9a-f]{32})")
+
+
+def prefab_animators(text: str) -> list[tuple[str, set[str]]]:
+    """Where each animating component sits: (its object's rig path, what it plays).
+
+    A clip's curve paths are relative to the object its Animator is on, not to the
+    prefab root, and in these builds the Animator is almost never on the root -
+    1,739 of 1,856 sit on a child. Guessing that object from the clip's own path
+    names failed whenever the clip drove the Animator's object itself (path "") or
+    sibling objects shared names, and then the clip moved the whole prefab: an
+    elephant's sway rocked the map page it stands on, strip of ground and all. The
+    path is in the rig records' form, the root being "", so it is the clip's prefix
+    as it stands. An Animator names its controller; a legacy Animation its clips.
+    """
+    parts = DOC_SPLIT_RE.split(text)
+    names: dict[str, str] = {}
+    transform_of: dict[str, str] = {}
+    owner_of: dict[str, str] = {}
+    father: dict[str, str] = {}
+    players: list[tuple[str, set[str]]] = []
+    for index in range(1, len(parts) - 2, 3):
+        class_id, file_id, body = int(parts[index]), parts[index + 1], parts[index + 2]
+        if class_id == 1:
+            match = FIELD_NAME_RE.search(body)
+            if match:
+                names[file_id] = match.group(1)
+        elif class_id in (4, 224):
+            owner = GAMEOBJECT_REF_RE.search(body)
+            if owner:
+                transform_of[owner.group(1)] = file_id
+                owner_of[file_id] = owner.group(1)
+                parent = FATHER_RE.search(body)
+                father[file_id] = parent.group(1) if parent else "0"
+        elif class_id in (95, 111):
+            owner = GAMEOBJECT_REF_RE.search(body)
+            if not owner:
+                continue
+            if class_id == 95:
+                controller = CONTROLLER_REF_RE.search(body)
+                plays = {controller.group(1)} if controller else set()
+            else:
+                plays = set(GUID_REF_RE.findall(body))
+            if plays:
+                players.append((owner.group(1), plays))
+
+    found = []
+    for gameobject, plays in players:
+        transform = transform_of.get(gameobject)
+        if transform is None:
+            continue
+        segments, seen = [], {transform}
+        while father.get(transform, "0") != "0":
+            segments.append(names.get(owner_of[transform], ""))
+            transform = father[transform]
+            if transform in seen or transform not in owner_of:
+                break
+            seen.add(transform)
+        found.append(("/".join(reversed(segments)), plays))
+    return found
+
+
+def joined(prefix: str, path: str) -> str:
+    """A clip path under an animator root. An empty clip path is the root itself."""
+    if not prefix:
+        return path
+    return f"{prefix}/{path}" if path else prefix
+
+
 def parse_clip(text: str) -> dict | None:
     """Return sprite tracks and a curve summary for one .anim file."""
     summary: dict[str, bool] = {}
@@ -397,7 +477,7 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
             "border_scale": RENDER_PPU / ppu,
         }
     clips = conn.execute(
-        "SELECT id, rel_path FROM assets WHERE unity_type='AnimationClip' AND ext='anim'"
+        "SELECT id, guid, rel_path FROM assets WHERE unity_type='AnimationClip' AND ext='anim'"
     ).fetchall()
 
     # Which prefabs use each clip, so the animated object names can be resolved to
@@ -408,10 +488,25 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
              JOIN assets h ON h.guid = u.holder_guid
             WHERE h.unity_type='Prefab'"""):
         holders[row["asset_id"]].append(row["rel_path"])
-    prefab_cache: dict[str, list[dict]] = {}
+    prefab_cache: dict[str, tuple[list[dict], list[tuple[str, set[str]]]]] = {}
+
+    # What each controller plays, so a clip is bound to the Animator that actually
+    # plays it. An override controller plays its base controller's clips as well as
+    # the ones it substitutes, so one step further through the refs is followed.
+    controllers = {row[0] for row in conn.execute(
+        "SELECT guid FROM assets WHERE lower(ext) IN ('controller', 'overridecontroller') "
+        "AND guid IS NOT NULL")}
+    plays: dict[str, set[str]] = defaultdict(set)
+    for src, dst in conn.execute("SELECT src_guid, dst_guid FROM refs"):
+        if src in controllers:
+            plays[src].add(dst)
+    for guid in list(plays):
+        for base in [dst for dst in plays[guid] if dst in controllers]:
+            plays[guid] |= plays.get(base, set())
 
     rows, stats = [], {"clips": len(clips), "with_sprites": 0, "frames": 0,
-                       "unresolved": 0, "rigged": 0, "layers": 0}
+                       "unresolved": 0, "rigged": 0, "layers": 0,
+                       "bound": 0, "guessed": 0}
     for clip in clips:
         try:
             text = (assets_root / clip["rel_path"]).read_text(encoding="utf-8", errors="ignore")
@@ -444,21 +539,31 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
             # rather than merging them and pulling in art from a different object.
             clip_paths = set(parsed["transforms"]) | set(parsed["floats"])
             records: list[dict] = []
-            best_score = -1
+            animator_root: str | None = None
+            best_score: tuple = ()
             for prefab_path in holders.get(clip["id"], [])[:8]:
                 if prefab_path not in prefab_cache:
                     try:
-                        prefab_cache[prefab_path] = parse_prefab_rig(
-                            (assets_root / prefab_path).read_text(
-                                encoding="utf-8", errors="ignore"))
+                        source = (assets_root / prefab_path).read_text(
+                            encoding="utf-8", errors="ignore")
+                        prefab_cache[prefab_path] = (parse_prefab_rig(source),
+                                                     prefab_animators(source))
                     except OSError:
-                        prefab_cache[prefab_path] = []
-                candidate = prefab_cache[prefab_path]
+                        prefab_cache[prefab_path] = ([], [])
+                candidate, animators = prefab_cache[prefab_path]
                 paths = {node["path"] for record in candidate
                          for node in record["chain"]}
-                score = len(clip_paths & paths)
-                if score > best_score:
-                    records, best_score = candidate, score
+                # The Animator that plays this clip, where the prefab holds one,
+                # fixes the prefix outright. Matching the clip's path names is left
+                # for prefabs whose Animator is not in this file.
+                roots = [path for path, sources in animators
+                         if clip["guid"] in sources
+                         or any(clip["guid"] in plays.get(g, ()) for g in sources)]
+                for root in roots or [None]:
+                    score = ((1, sum(1 for c in clip_paths if joined(root, c) in paths))
+                             if root is not None else (0, len(clip_paths & paths)))
+                    if score > best_score:
+                        records, animator_root, best_score = candidate, root, score
             prefab_paths = {node["path"] for record in records
                             for node in record["chain"]}
 
@@ -467,18 +572,23 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
             # on the bare leaf name instead let one clip path bind to several prefab
             # objects, which is how the same sprite ended up drawn twice. Recovering
             # the one shared prefix that explains the most paths keeps it exact.
-            candidates = {""}
-            for clip_path in clip_paths:
-                suffix = "/" + clip_path
-                for prefab_path in prefab_paths:
-                    if prefab_path.endswith(suffix):
-                        candidates.add(prefab_path[:-len(suffix)])
-
-            def joined(prefix: str, path: str) -> str:
-                return f"{prefix}/{path}" if prefix else path
-
-            prefix = max(candidates, key=lambda p: (
-                sum(1 for c in clip_paths if joined(p, c) in prefab_paths), -len(p)))
+            if animator_root is not None:
+                prefix = animator_root
+                if records:
+                    stats["bound"] += 1
+            else:
+                candidates = {""}
+                for clip_path in clip_paths:
+                    if not clip_path:
+                        continue
+                    suffix = "/" + clip_path
+                    for prefab_path in prefab_paths:
+                        if prefab_path.endswith(suffix):
+                            candidates.add(prefab_path[:-len(suffix)])
+                prefix = max(candidates, key=lambda p: (
+                    sum(1 for c in clip_paths if joined(p, c) in prefab_paths), -len(p)))
+                if records:
+                    stats["guessed"] += 1
             # Everything the clip drives lives under its animator root, so art
             # outside that subtree belongs to some other animator - a shelf's price
             # tag sitting at the prefab root would otherwise float over the doors.
@@ -652,7 +762,8 @@ def main() -> None:
     stats = build(args.export.resolve(), conn)
     print(f"clips={stats['clips']}  sprite_swap={stats['with_sprites']} "
           f"({stats['frames']} frames)  rigged={stats['rigged']} "
-          f"({stats['layers']} layers)  unresolved={stats['unresolved']}")
+          f"({stats['layers']} layers)  unresolved={stats['unresolved']}  "
+          f"bound to their Animator={stats['bound']}  guessed from names={stats['guessed']}")
     for row in conn.execute(
         """SELECT a.name, n.frame_count, n.duration FROM animations n
              JOIN assets a ON a.id = n.asset_id

@@ -194,6 +194,28 @@ check("and keeps the parts it deliberately hides hidden",
 check("overlapping parts read as one figure", figureCount(DATA[eOne]), 1);
 check("figures standing apart are counted", figureCount(DATA[eThree]), 3);
 
+// A body that bounces half a unit while a hat is parked fifty units away to hide it.
+const camLayers = [{name: "body", size: [100, 100], chain: [0]},
+                   {name: "eye", size: [10, 10], chain: [1]},
+                   {name: "hat", size: [20, 20], chain: [2]}];
+const camNodes = [{base: [0, 0, 1, 1], pos: [[0, 0, 0, 0], [1, 0, 0.5, 0]]},
+                  {base: [0.2, 0.2, 1, 1]},
+                  {base: [0, 0.6, 1, 1], pos: [[0, 0, 0.6, 0], [0.5, 50, 0.6, 0], [1, 50, 0.6, 0]]}];
+const camFit = rigFit(camLayers, camNodes, 1);
+check("the camera holds still while a part bounces and another is parked away",
+      stageTransform(camLayers, camNodes, 0, 1, undefined, camFit.cam),
+      stageTransform(camLayers, camNodes, 1, 1, undefined, camFit.cam));
+check("and so does not follow", camFit.cam.follow, false);
+// The same rig driven twenty units across as a whole.
+const tripNodes = [{base: [0, 0, 1, 1], pos: [[0, 0, 0, 0], [1, 20, 0, 0]]},
+                   {base: [0, 0, 1, 1]}, {base: [0.2, 0.2, 1, 1]}, {base: [0, 0.6, 1, 1]}];
+const tripLayers = camLayers.map((layer, i) => ({...layer, chain: [0, i + 1]}));
+const tripFit = rigFit(tripLayers, tripNodes, 1);
+check("a rig that travels as a whole is followed", tripFit.cam.follow, true);
+check("and stays in frame at the end of its trip",
+      stageTransform(tripLayers, tripNodes, 1, 1, undefined, tripFit.cam)
+        .includes("translate(-2"), true);
+
 const sheets = atlasSection(FIXTURE_OBJECTS[objSheets]);
 check("only the cuts on the sheet being drawn are outlined",
       (sheets.match(/<i /g) || []).length, 1);
