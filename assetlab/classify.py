@@ -597,6 +597,10 @@ def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
 BUNDLE_DEPTH = 4
 
 
+#: A SpriteAtlas asset, as the Unity 2020 packer and the V2 packer save it.
+ATLAS_EXTENSIONS = (".spriteatlas", ".spriteatlasv2")
+
+
 def bundle_reach(conn: sqlite3.Connection,
                  bundle_map: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
     """Carry each bundle's container path from the assets it names to what they use.
@@ -620,7 +624,7 @@ def bundle_reach(conn: sqlite3.Connection,
         if hit:
             labels[row["guid"]] = hit
     atlases = {stem: value for stem, value in bundle_map.items()
-               if value[1].lower().endswith(".spriteatlas")}
+               if value[1].lower().endswith(ATLAS_EXTENSIONS)}
     if atlases:
         for row in conn.execute(
                 "SELECT guid, name FROM assets WHERE unity_type='Texture2D' "

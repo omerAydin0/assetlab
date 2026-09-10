@@ -916,6 +916,9 @@ def bundle_reach_checks() -> None:
                 ("g_page", "sactx-0-1024x1024-ASTC 6x6-ShopAtlas-abc12345", "Texture2D",
                  "png"),
                 ("g_sprite", "shop_button", "Sprite", "asset"),
+                ("g_page2", "sactx-0-2048x2048-ASTC 6x6-board atlas-def67890", "Texture2D",
+                 "png"),
+                ("g_tile", "board_tile", "Sprite", "asset"),
                 ("g_other", "unrelated", "Sprite", "asset")):
             conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext) "
                          "VALUES (?, ?, ?, ?, ?)", (guid, f"{name}.{ext}", name, kind, ext))
@@ -924,14 +927,20 @@ def bundle_reach_checks() -> None:
             "SELECT id FROM assets WHERE guid = 'g_sprite'").fetchone()[0]
         conn.execute("INSERT INTO sprites (asset_id, atlas_guid, x, y, w, h) "
                      "VALUES (?, 'g_page', 0, 0, 10, 10)", (sprite_id,))
+        tile_id = conn.execute("SELECT id FROM assets WHERE guid = 'g_tile'").fetchone()[0]
+        conn.execute("INSERT INTO sprites (asset_id, atlas_guid, x, y, w, h) "
+                     "VALUES (?, 'g_page2', 0, 0, 10, 10)", (tile_id,))
         reached = bundle_reach(conn, {
             "shopdialog": ("b1", "Assets/Game/UI/Shop/ShopDialog.prefab"),
-            "shopatlas": ("b2", "Assets/Game/UI/Shop/ShopAtlas.spriteatlas")})
+            "shopatlas": ("b2", "Assets/Game/UI/Shop/ShopAtlas.spriteatlas"),
+            "board atlas": ("b3", "assets/common_atlas/board atlas.spriteatlasv2")})
         conn.close()
     check("a bundle's label reaches what its container references",
           reached.get("g_tex", (None,))[0], "b1")
     check("and every sprite on the pages of an atlas it names",
           reached.get("g_sprite", (None,))[0], "b2")
+    check("the V2 packer's atlas reaches its pages' sprites too",
+          reached.get("g_tile", (None,))[0], "b3")
     check("but not what it does not reach", "g_other" in reached, False)
     check("and nothing at all without a bundle map", bundle_reach(None, {}), {})
 
