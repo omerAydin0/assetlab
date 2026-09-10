@@ -415,11 +415,11 @@ def diagnose_export(export: Path, primary: Path | None = None,
 
     if primary:
         bundle_dir = primary / "AssetBundle"
-        bundles = len(list(bundle_dir.glob("*.bundle.json"))) if bundle_dir.is_dir() else 0
+        bundles = len(list(bundle_dir.glob("*.json"))) if bundle_dir.is_dir() else 0
         if bundles:
             result.add(OK, f"{bundles} AssetBundle manifests -> Addressables provenance")
         else:
-            result.add(WARN, "no AssetBundle/*.bundle.json in --primary-content",
+            result.add(WARN, "no AssetBundle/*.json records in --primary-content",
                        "optional; it only adds bundle labels")
 
     result.checks.extend(diagnose_levels(export, data_files))

@@ -53,6 +53,12 @@ remember between steps. Staging goes to `staging/<name>` and the export to
 on a second run, so re-analysing costs minutes rather than an hour. `--restage`
 forces the expensive halves to run again.
 
+`--primary-export` asks AssetRipper for a second export of the same load, a *Primary
+Content* export to `exports/<name>_primary`, and hands its `Assets` folder to
+classification as if it had been passed with `--primary-content`: its bundle records
+are what bundle provenance is read from. It only adds anything for a build that ships
+AssetBundles, and it costs a second export, so it is off unless asked for.
+
 It ends with a verdict rather than a wall of output:
 
 ```

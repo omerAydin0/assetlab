@@ -578,7 +578,9 @@ def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
     if not bundle_dir.is_dir():
         return {}
     mapping: dict[str, tuple[str, str]] = {}
-    for path in bundle_dir.glob("*.bundle.json"):
+    # A record is named after its bundle, `<bundle name>.json`; `.bundle.json` was only
+    # ever one build's bundle naming, and matching it read nothing from any other.
+    for path in bundle_dir.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
         except (OSError, json.JSONDecodeError):

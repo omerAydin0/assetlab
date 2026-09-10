@@ -5,7 +5,10 @@ Run: python -m assetlab.selftest
 
 from __future__ import annotations
 
+import http.server
 import tempfile
+import threading
+import urllib.parse
 from pathlib import Path
 
 from PIL import Image
@@ -24,6 +27,8 @@ from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
 from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
                      diagnose_staging)
 from .levels import corpus_candidates, looks_like_tiled, parse_level
+from .ripper import Ripper
+from .classify import load_bundle_map
 from .slice_sprites import (ROTATION_90, anchor, packing_rotation, parse_sprite,
                             unrotate)
 
@@ -818,6 +823,56 @@ def spine_catalogue_checks() -> None:
         conn.close()          # Windows will not remove a directory it still holds
 
 
+def ripper_checks() -> None:
+    """The primary content pass asks AssetRipper for that export, and its records are read."""
+    with tempfile.TemporaryDirectory() as tmp:
+        records = Path(tmp) / "AssetBundle"
+        records.mkdir()
+        # Named after the bundle, as AssetRipper writes it; not every build's bundles
+        # end in `.bundle`.
+        (records / "common_atlas.unity3d.json").write_text(
+            '{"m_AssetBundleName": "common_atlas", "m_Container": '
+            '{"assets/common_atlas/board atlas.spriteatlasv2": {}}}', encoding="utf-8")
+        check("a bundle record is read whatever its bundle is named",
+              load_bundle_map(Path(tmp)).get("board atlas"),
+              ("common_atlas", "assets/common_atlas/board atlas.spriteatlasv2"))
+
+    posted: list[tuple[str, dict]] = []
+
+    class Stub(http.server.BaseHTTPRequestHandler):
+        # Answers the way AssetRipper does: a form POST redirects to the home page.
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", 0))
+            fields = dict(urllib.parse.parse_qsl(self.rfile.read(length).decode()))
+            posted.append((self.path, fields))
+            (Path(fields["path"]) / "Assets").mkdir(parents=True, exist_ok=True)
+            self.send_response(302)
+            self.send_header("Location", "/")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_: object) -> None:
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = (Path(tmp) / "game_primary").resolve()
+            stub = Ripper(base_url=f"http://127.0.0.1:{server.server_port}")
+            exported = stub.export_primary_content(target)
+            check("the primary content pass calls AssetRipper's own export for it",
+                  [path for path, _ in posted], ["/Export/PrimaryContent"])
+            check("into the folder it was given", posted[0][1].get("path"), str(target))
+            check("and hands back that export's Assets", exported, target / "Assets")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def outcome_checks() -> None:
     """The vocabulary ratio, and the small build it must not accuse."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -1098,6 +1153,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     spine_catalogue_checks()
     index_rerun_checks()
     thumbnail_checks()
+    ripper_checks()
     outcome_checks()
 
     for line in FAILED:

@@ -124,7 +124,7 @@ def run_pipeline(input_path: Path, out: Path, title: str,
                  exe: Path | None = None, port: int = 5599,
                  primary: Path | None = None, rules_path: Path | None = None,
                  skip: tuple[str, ...] = (), restage: bool = False,
-                 build_hub: bool = True) -> dict:
+                 build_hub: bool = True, primary_export: bool = False) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     staging = (staging or Path("staging") / out.name).resolve()
     export_dir = (export_dir or Path("exports") / out.name).resolve()
@@ -173,25 +173,49 @@ def run_pipeline(input_path: Path, out: Path, title: str,
     # -------------------------------------------------------- 3. assetripper
     started = time.time()
     exported = export_dir / "ExportedProject" / "Assets"
-    if not restage and exported.is_dir() and any(exported.iterdir()):
+    export_project = restage or not (exported.is_dir() and any(exported.iterdir()))
+    if not export_project:
         steps.append(Step("assetripper", "reused", f"export already at {exported}",
                           time.time() - started))
-    else:
+    # The opt-in second pass: a Primary Content export of the same load, read only for
+    # the bundle records whose `m_Container` gives classification its provenance. A
+    # path passed as --primary-content is used as it is instead.
+    primary_dir = export_dir.with_name(f"{export_dir.name}_primary")
+    export_primary = False
+    if primary_export and primary is None:
+        if not restage and (primary_dir / "Assets").is_dir():
+            primary = primary_dir / "Assets"
+            steps.append(Step("primary export", "reused", f"export already at {primary}"))
+        else:
+            export_primary = True
+    if export_project or export_primary:
         found_exe = ripper.find_exe(exe)
+        hint = ("" if found_exe else
+                f" No AssetRipper executable was found; set {ripper.EXE_ENV} or pass "
+                f"--exe, or start one yourself on port {port}.")
+        stage = "assetripper" if export_project else "primary export"
         try:
-            exported = ripper.rip(staged_tree(staging, manifest), export_dir,
-                                  found_exe, port)
-            steps.append(Step("assetripper", "ok", str(exported), time.time() - started))
+            with ripper.loaded(staged_tree(staging, manifest), found_exe, port) as loaded:
+                if export_project:
+                    print(f"exporting  {export_dir}", flush=True)
+                    exported = loaded.export_unity_project(export_dir)
+                    steps.append(Step("assetripper", "ok", str(exported),
+                                      time.time() - started))
+                    stage, started = "primary export", time.time()
+                if export_primary:
+                    print(f"exporting  {primary_dir} (primary content)", flush=True)
+                    primary = loaded.export_primary_content(primary_dir)
+                    steps.append(Step("primary export", "ok", str(primary),
+                                      time.time() - started))
         except ripper.RipperError as error:
-            hint = ("" if found_exe else
-                    f" No AssetRipper executable was found; set {ripper.EXE_ENV} or pass "
-                    f"--exe, "
-                    f"or start one yourself on port {port}.")
-            steps.append(Step("assetripper", "failed", f"{error}{hint}",
-                              time.time() - started))
-            print(f"FAIL  AssetRipper: {error}{hint}")
-            return finish(out, title, input_path, manifest, steps, staging_report, None,
-                          {}, started_all, BLOCKED)
+            steps.append(Step(stage, "failed", f"{error}{hint}", time.time() - started))
+            if stage == "assetripper":
+                print(f"FAIL  AssetRipper: {error}{hint}")
+                return finish(out, title, input_path, manifest, steps, staging_report,
+                              None, {}, started_all, BLOCKED)
+            # Provenance adds to a catalogue; it is not a condition of one.
+            print(f"WARN  primary content export: {error}{hint} "
+                  f"- bundle provenance is off for this run")
 
     # -------------------------------------------------------- 4. export gate
     started = time.time()
@@ -216,6 +240,7 @@ def run_pipeline(input_path: Path, out: Path, title: str,
         "packages": [p["name"] for p in manifest["packages"] if p["included"]],
         "staged_root": manifest.get("staged_root"),
         "export": str(exported),
+        "primary_content": str(primary) if primary else None,
         "il2cpp_metadata": bool((manifest.get("il2cpp") or {}).get("metadata")),
     }
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('provenance', ?)",

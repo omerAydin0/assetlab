@@ -125,6 +125,11 @@ def main() -> None:
                         help="skip rebuilding the combined hub page at the end")
     parser.add_argument("--restage", action="store_true",
                         help="re-stage and re-export even if previous output is present")
+    parser.add_argument("--primary-export", action="store_true",
+                        help="also have AssetRipper write a Primary Content export to "
+                             "<export dir>_primary and read its bundle records for "
+                             "provenance; a second export of the whole build, so off "
+                             "unless asked for. --primary-content wins if both are given")
     args = parser.parse_args()
 
     out = args.out.resolve()
@@ -132,6 +137,9 @@ def main() -> None:
     rules_path = args.rules or Path("rules") / f"{args.out.name}.json"
     primary = args.primary_content.resolve() if args.primary_content else None
 
+    if args.primary_export and not args.input:
+        parser.error("--primary-export needs --input; an existing export takes "
+                     "--primary-content instead")
     if args.input:
         from .pipeline import run_pipeline
         report = run_pipeline(
@@ -140,7 +148,7 @@ def main() -> None:
             export_dir=args.export_dir.resolve() if args.export_dir else None,
             exe=args.exe, port=args.port, primary=primary,
             rules_path=rules_path, skip=tuple(args.skip), restage=args.restage,
-            build_hub=not args.no_hub)
+            build_hub=not args.no_hub, primary_export=args.primary_export)
         raise SystemExit(0 if report["status"] != "BLOCKED" else 1)
 
     if not args.export.is_dir():

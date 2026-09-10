@@ -6,6 +6,14 @@ AssetRipper.GUI.Free hosts a documented web API (see /openapi.json) and takes
     settings -> POST /Settings/Update
     load     -> POST /LoadFolder      {path}
     export   -> POST /Export/UnityProject {path}
+    and, only when asked for, a second export of the same load:
+             -> POST /Export/PrimaryContent {path}
+
+The second export is read for one thing. It keeps each AssetBundle's own record as
+`Assets/AssetBundle/<bundle name>.json`, whose `m_Container` names the bundle's
+entries by the path the developer gave them, and classification reads that as the
+provenance of art nothing in the project references. It costs a second export of the
+whole build, so it stays opt-in.
 
 The settings AssetLab depends on are enforced here rather than trusted. Sprite YAML
 and .meta GUIDs are what make sprite slicing and the reference graph possible at
@@ -28,6 +36,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 #: Where the executable is looked for when none is given. An installation this
@@ -229,12 +239,27 @@ class Ripper:
             raise RipperError(f"export finished but {exported} does not exist")
         return exported
 
+    def export_primary_content(self, out_dir: Path, timeout: float = 14400) -> Path:
+        """The loaded build's assets as AssetRipper reads them, bundle records included."""
+        out_dir = Path(out_dir).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._post("/Export/PrimaryContent", {"path": str(out_dir)}, timeout=timeout)
+        exported = out_dir / "Assets"
+        if not exported.is_dir():
+            raise RipperError(f"primary content export finished but {exported} does not exist")
+        return exported
+
     def reset(self) -> None:
         self._post("/Reset", {})
 
 
-def rip(input_dir: Path, out_dir: Path, exe: Path | None, port: int,
-        keep_running: bool = False) -> Path:
+@contextmanager
+def loaded(input_dir: Path, exe: Path | None, port: int,
+           keep_running: bool = False) -> Iterator[Ripper]:
+    """AssetRipper with one staged build loaded, for as many exports as are wanted.
+
+    Loading is the slow part, so a second export of the same build reuses it.
+    """
     ripper = Ripper(exe, port)
     started_here = not ripper.is_up()
     ripper.start()
@@ -254,14 +279,20 @@ def rip(input_dir: Path, out_dir: Path, exe: Path | None, port: int,
         failed = ripper.failed_files()
         if failed:
             print(f"           {len(failed)} file(s) failed to parse (see /FailedFiles/View)")
+        yield ripper
+    finally:
+        if started_here and not keep_running:
+            ripper.stop()
+
+
+def rip(input_dir: Path, out_dir: Path, exe: Path | None, port: int,
+        keep_running: bool = False) -> Path:
+    with loaded(input_dir, exe, port, keep_running) as ripper:
         print(f"exporting  {out_dir}", flush=True)
         started = time.time()
         exported = ripper.export_unity_project(out_dir)
         print(f"exported   in {time.time() - started:.0f}s -> {exported}")
         return exported
-    finally:
-        if started_here and not keep_running:
-            ripper.stop()
 
 
 def main() -> None:
