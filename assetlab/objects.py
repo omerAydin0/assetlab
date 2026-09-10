@@ -41,8 +41,10 @@ each rule below was written against a case a real build produced:
 """
 from __future__ import annotations
 
+import json
 import re
-from collections import defaultdict
+import sqlite3
+from collections import Counter, defaultdict
 from pathlib import Path
 
 #: The seams an artist actually types: a separator, the join between a lower-case run
@@ -126,13 +128,19 @@ def group_objects(records: list[dict], rigs: list[tuple[int, list[str]]]) -> lis
     Ordering is by how much art the object accounts for, so the sets worth looking at
     come first and the singletons trail behind.
     """
+    # Art a prefab already assembles is that prefab's. A clip drawing it does not make
+    # it a second object.
+    claimed = {record["img"] for record in records if record.get("pf")}
+    if claimed:
+        rigs = [(position, [image for image in images if image not in claimed])
+                for position, images in rigs]
     by_image = {}
     for index, record in enumerate(records):
         if record.get("img") and record["img"] not in by_image:
             by_image[record["img"]] = index
     sprites = [index for index, record in enumerate(records)
                if record.get("img") and record.get("kind") == "image"
-               and not record.get("at")]
+               and not record.get("at") and not record.get("pf")]
     tokens = {index: name_tokens(records[index]["n"]) for index in sprites}
 
     # Longest name wins a tie, so `dogEar_1` attaches to `dog` and not to `` - and a
@@ -286,3 +294,59 @@ def group_objects(records: list[dict], rigs: list[tuple[int, list[str]]]) -> lis
     objects.sort(key=lambda e: (-(len(e["p"]) + (1 if e["w"] is not None else 0)),
                                 e["n"].lower()))
     return objects
+
+
+#: A prefab drawing this many sprites or more is a screen or a map page, not a thing on
+#: it, and is listed after the objects.
+SCENE_PARTS = 50
+#: So is one whose largest cluster of overlapping parts holds less than this share of
+#: them: separate things placed apart on one canvas, not one thing put together.
+MAIN_FIGURE = 0.6
+
+
+def prefab_objects(conn: sqlite3.Connection, records: list[dict], row_id: list[int],
+                   prefix: str = "") -> list[dict]:
+    """Every prefab that assembles two or more sprites, as one object.
+
+    The prefab is what the build says an object is: which sprites, and where. Its
+    picture is drawn by `prefabs.py`; its pieces are the sprites it shows; its clips
+    are the ones its own Animator plays. The sprites it claims are marked so that
+    grouping by name does not make them a second, guessed object.
+    """
+    try:
+        rows = conn.execute(
+            """SELECT p.prefab_id, p.sprites, p.width, p.height, p.pose, p.main, a.name
+                 FROM prefab_poses p JOIN assets a ON a.id = p.prefab_id
+                WHERE p.same_as IS NULL""").fetchall()
+    except sqlite3.OperationalError:
+        return []
+    position_of = {asset_id: position for position, asset_id in enumerate(row_id)}
+    clips_of: dict[int, list[int]] = defaultdict(list)
+    try:
+        for clip_id, holder in conn.execute(
+                "SELECT asset_id, holder_id FROM animations "
+                "WHERE holder_id IS NOT NULL AND layers IS NOT NULL"):
+            if clip_id in position_of:
+                clips_of[holder].append(position_of[clip_id])
+    except sqlite3.OperationalError:
+        pass
+    found = []
+    for row in rows:
+        parts = [position_of[i] for i in json.loads(row["sprites"]) if i in position_of]
+        if len(parts) < 2:
+            continue
+        sheets = Counter(records[i]["ax"] for i in parts
+                         if records[i].get("ax") is not None)
+        clips = clips_of.get(row["prefab_id"], [])
+        scene = len(parts) >= SCENE_PARTS or (row["main"] or 0) < MAIN_FIGURE
+        found.append({"sc": 1 if scene else 0,"n": row["name"], "w": None, "p": parts,
+                      "c": clips[0] if clips else None,
+                      "fam": records[parts[0]].get("mechanic")
+                      or records[parts[0]].get("feature"),
+                      "a": sheets.most_common(1)[0][0] if sheets else None,
+                      "pose": prefix + row["pose"], "cs": clips})
+    for entry in found:
+        for index in entry["p"]:
+            records[index]["pf"] = 1
+    found.sort(key=lambda e: (e["sc"], -len(e["p"]), e["n"].lower()))
+    return found

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .browser import MODEL_VIEW, RIG_ENGINE, SHARED_VIEWS, web_source
 from .core import connect
-from .objects import group_objects
+from .objects import group_objects, prefab_objects
 
 MEDIA_KINDS = {"image", "audio", "animation", "font"}
 
@@ -159,7 +159,8 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
         if (out_dir / name / "atlas" / f"{row_id[position]}.jpg").is_file():
             records[position]["sheet"] = f"{prefix}atlas/{row_id[position]}.jpg"
 
-    objects = group_objects(records, [
+    assembled = prefab_objects(conn, records, row_id, prefix)
+    objects = assembled + group_objects(records, [
         (position, [layer["img"] for layer in record["layers"]])
         for position, record in enumerate(records) if record.get("layers")])
 
@@ -244,6 +245,8 @@ def build(out_dir: Path, names: list[str]) -> dict:
             entry["p"] = [index + base for index in entry["p"]]
             entry["c"] = None if entry["c"] is None else entry["c"] + base
             entry["a"] = None if entry["a"] is None else entry["a"] + base
+            if entry.get("cs"):
+                entry["cs"] = [index + base for index in entry["cs"]]
         objects.extend(grouped)
         data.extend(records)
         games.append(meta)

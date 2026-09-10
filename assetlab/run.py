@@ -19,11 +19,11 @@ import time
 from pathlib import Path
 
 from . import (animations, browser, classify, dedup, graph, index, levels, models,
-               profile, skin, spine)
+               prefabs, profile, skin, spine)
 from .core import connect
 
 STAGE_NAMES = ("profile", "index", "graph", "slice", "spine", "models", "skin", "levels",
-               "animations", "classify", "dedup", "browser")
+               "animations", "prefabs", "classify", "dedup", "browser")
 
 
 def analyse(export: Path, out: Path, title: str = "AssetLab",
@@ -76,6 +76,8 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
         # are what let classify label obstacle art from evidence.
         ("levels", lambda: levels.scan_levels(export, conn)),
         ("animations", lambda: animations.build(export, conn)),
+        # Each prefab drawn as the build assembles it: an object's final form.
+        ("prefabs", lambda: prefabs.build(export, out, conn)),
         ("classify", lambda: classify.classify(export, primary, conn, rules_path)),
         ("dedup", lambda: dedup.deduplicate(conn)),
         ("browser", lambda: browser.build(out, export, title, conn)),

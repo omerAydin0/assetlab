@@ -17,7 +17,7 @@ from pathlib import Path
 from PIL import Image
 
 from .core import connect, load_rgba, make_thumbnail
-from .objects import group_objects
+from .objects import group_objects, prefab_objects
 
 AUDIO_EXT = {"ogg", "wav", "mp3", "m4a", "aac", "flac"}
 FONT_EXT = {"ttf", "otf", "woff", "woff2"}
@@ -274,7 +274,10 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
         records[position]["ax"] = page
         records[position]["r"] = list(rect[1:])
 
-    grouped = group_objects(records, [
+    # The build's own objects first: each prefab that assembles two or more sprites.
+    # Naming then groups only what no prefab puts together.
+    assembled = prefab_objects(conn, records, row_id)
+    grouped = assembled + group_objects(records, [
         (position, [layer["img"] for layer in record["layers"]])
         for position, record in enumerate(records) if record.get("layers")])
 

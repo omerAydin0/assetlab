@@ -991,6 +991,114 @@ def rotation_unwrap_checks() -> None:
           [round(key[3]) for key in keys], [170, 190])
 
 
+PAIR_PREFAB = """%YAML 1.1
+--- !u!1 &100
+GameObject:
+  m_Name: Pair
+  m_IsActive: 1
+--- !u!4 &400
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 401}
+  - {fileID: 402}
+  - {fileID: 403}
+  m_Father: {fileID: 0}
+--- !u!1 &101
+GameObject:
+  m_Name: Left
+  m_IsActive: 1
+--- !u!4 &401
+Transform:
+  m_GameObject: {fileID: 101}
+  m_LocalPosition: {x: -1, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+--- !u!212 &212001
+SpriteRenderer:
+  m_GameObject: {fileID: 101}
+  m_Enabled: 1
+  m_Sprite: {fileID: 21300000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+--- !u!1 &102
+GameObject:
+  m_Name: Right
+  m_IsActive: 1
+--- !u!4 &402
+Transform:
+  m_GameObject: {fileID: 102}
+  m_LocalPosition: {x: 1, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+--- !u!212 &212002
+SpriteRenderer:
+  m_GameObject: {fileID: 102}
+  m_Enabled: 1
+  m_Sprite: {fileID: 21300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+--- !u!1 &103
+GameObject:
+  m_Name: Hidden
+  m_IsActive: 0
+--- !u!4 &403
+Transform:
+  m_GameObject: {fileID: 103}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+--- !u!212 &212003
+SpriteRenderer:
+  m_GameObject: {fileID: 103}
+  m_Enabled: 1
+  m_Sprite: {fileID: 21300000, guid: dddddddddddddddddddddddddddddddd, type: 3}
+"""
+
+
+def prefab_pose_checks() -> None:
+    """A prefab is drawn as it assembles: parts where it puts them, hidden ones left out."""
+    import json
+    from . import prefabs
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "sprites").mkdir()
+        for name, colour in (("red", (255, 0, 0, 255)), ("blue", (0, 0, 255, 255)),
+                             ("green", (0, 255, 0, 255))):
+            Image.new("RGBA", (100, 100), colour).save(root / "sprites" / f"{name}.png")
+        (root / "Pair.prefab").write_text(PAIR_PREFAB, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            for guid, name in (("a" * 32, "red"), ("b" * 32, "blue"), ("d" * 32, "green")):
+                conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext, "
+                             "width, height, image_path) VALUES (?, ?, ?, 'Sprite', 'asset', "
+                             "100, 100, ?)", (guid, f"{name}.asset", name, f"sprites/{name}.png"))
+            conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext) "
+                         "VALUES (?, 'Pair.prefab', 'Pair', 'Prefab', 'prefab')", ("9" * 32,))
+            for (asset_id,) in conn.execute(
+                    "SELECT id FROM assets WHERE unity_type='Sprite'").fetchall():
+                conn.execute("INSERT INTO sprites (asset_id, ppu, anchor_x, anchor_y) "
+                             "VALUES (?, 100, 0.5, 0.5)", (asset_id,))
+            conn.commit()
+            stats = prefabs.build(root, root, conn)
+            row = conn.execute(
+                "SELECT sprites, pose, figures, main FROM prefab_poses").fetchone()
+            with Image.open(root / row["pose"]) as pose:
+                pose = pose.convert("RGBA")
+                w, h = pose.size
+                left = pose.getpixel((round(w * 0.2), h // 2))
+                right = pose.getpixel((round(w * 0.8), h // 2))
+                middle = pose.getpixel((w // 2, h // 2))
+            pieces = len(json.loads(row["sprites"]))
+        finally:
+            conn.close()          # Windows will not remove a directory it still holds
+    check("a prefab with two sprites on show is drawn once", stats["drawn"], 1)
+    check("each part lands where the prefab puts it",
+          (left[0] > 200 and left[2] < 60, right[2] > 200 and right[0] < 60), (True, True))
+    check("a part the prefab ships switched off is left off", middle[3], 0)
+    check("its pieces are the two sprites it shows", pieces, 2)
+    check("two parts standing apart are two figures, neither one most of it",
+          (row["figures"], row["main"]), (2, 0.5))
+
+
 def addressables_checks() -> None:
     """What a catalogue declares, against what the package it ships in holds."""
     import base64
@@ -1414,6 +1522,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     object_checks()
     animator_binding_checks()
     rotation_unwrap_checks()
+    prefab_pose_checks()
     spine_checks()
     addressables_checks()
     type_checks()

@@ -216,6 +216,13 @@ check("and stays in frame at the end of its trip",
       stageTransform(tripLayers, tripNodes, 1, 1, undefined, tripFit.cam)
         .includes("translate(-2"), true);
 
+const poseObj = {n: "BeePrefab", w: null, p: [], c: null, a: null,
+                 pose: "poses/7.png", cs: []};
+check("a prefab object's card shows the prefab assembled",
+      objectCard([poseObj, 0]).includes('src="poses/7.png"'), true);
+check("and its panel shows it as the final form",
+      /final form[\s\S]*poses\/7\.png/.test(objectPanel(poseObj)), true);
+
 const sheets = atlasSection(FIXTURE_OBJECTS[objSheets]);
 check("only the cuts on the sheet being drawn are outlined",
       (sheets.match(/<i /g) || []).length, 1);

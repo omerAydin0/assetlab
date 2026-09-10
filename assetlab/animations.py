@@ -450,7 +450,8 @@ def parse_clip(text: str) -> dict | None:
             "floats": parse_float_curves(text)}
 
 
-def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
+def load_sprite_meta(conn: sqlite3.Connection) -> tuple[dict[str, str], dict[str, dict]]:
+    """Every drawable sprite: its image, and its size, pivot and nine-slice at render scale."""
     sprite_image: dict[str, str] = {}
     sprite_meta: dict[str, dict] = {}
     for row in conn.execute(
@@ -476,6 +477,11 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
             "border": (json.loads(row["border"]) if row["border"] else None),
             "border_scale": RENDER_PPU / ppu,
         }
+    return sprite_image, sprite_meta
+
+
+def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
+    sprite_image, sprite_meta = load_sprite_meta(conn)
     clips = conn.execute(
         "SELECT id, guid, rel_path FROM assets WHERE unity_type='AnimationClip' AND ext='anim'"
     ).fetchall()
@@ -483,11 +489,13 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
     # Which prefabs use each clip, so the animated object names can be resolved to
     # the sprites the prefab actually puts on them.
     holders: dict[int, list[str]] = defaultdict(list)
+    prefab_id_of: dict[str, int] = {}
     for row in conn.execute(
-        """SELECT u.asset_id, h.rel_path FROM used_by u
+        """SELECT u.asset_id, h.rel_path, h.id FROM used_by u
              JOIN assets h ON h.guid = u.holder_guid
             WHERE h.unity_type='Prefab'"""):
         holders[row["asset_id"]].append(row["rel_path"])
+        prefab_id_of[row["rel_path"]] = row["id"]
     prefab_cache: dict[str, tuple[list[dict], list[tuple[str, set[str]]]]] = {}
 
     # What each controller plays, so a clip is bound to the Animator that actually
@@ -533,6 +541,7 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
         layers: list[dict] = []
         node_pool: list[dict] = []
         mask_pool: list[dict] = []
+        chosen: str | None = None
         if not frames and parsed["transforms"]:
             # Several prefabs may share a clip. Since every sprite in the rig is
             # drawn, take the single prefab that best explains the animated paths
@@ -563,7 +572,8 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
                     score = ((1, sum(1 for c in clip_paths if joined(root, c) in paths))
                              if root is not None else (0, len(clip_paths & paths)))
                     if score > best_score:
-                        records, animator_root, best_score = candidate, root, score
+                        records, animator_root, best_score, chosen = (
+                            candidate, root, score, prefab_path)
             prefab_paths = {node["path"] for record in records
                             for node in record["chain"]}
 
@@ -739,15 +749,18 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
             "nodes": json.dumps(node_pool, separators=(",", ":")) if layers else None,
             "masks": json.dumps(mask_pool, separators=(",", ":")) if mask_pool else None,
             "layer_count": len(layers),
+            # The prefab this clip plays in, so the object view can offer the clip
+            # beside the prefab it animates.
+            "holder_id": prefab_id_of.get(chosen) if layers else None,
         })
 
     conn.executemany(
         """INSERT OR REPLACE INTO animations
            (asset_id, duration, sample_rate, frame_count, track_count, track_path,
-            frames, curve_summary, layers, nodes, masks, layer_count)
+            frames, curve_summary, layers, nodes, masks, layer_count, holder_id)
            VALUES (:asset_id, :duration, :sample_rate, :frame_count, :track_count,
                    :track_path, :frames, :curve_summary, :layers, :nodes, :masks,
-                   :layer_count)""", rows)
+                   :layer_count, :holder_id)""", rows)
     conn.commit()
     return stats
 

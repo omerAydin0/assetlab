@@ -387,8 +387,10 @@ compose into rigs totalling 35,080 layers.
 
 An object is one thing on screen, and the browser shows it three ways at once:
 
-- **Final form** — the object assembled. The composed rig where the build ships a
-  clip that draws it, otherwise the sprite it ships whole.
+- **Final form** — the object assembled. For a prefab, the prefab as the build puts it
+  together, drawn once into a picture; where the prefab's Animator plays a clip, that
+  clip plays beneath it. For art no prefab assembles, the composed rig of a clip that
+  draws it, otherwise the sprite it ships whole.
 
   Which clip is a picture of the object is decided by a gate and then a ranking. The
   catalogue used to record whichever clip came first, which put the koala's *appear* in
@@ -428,8 +430,24 @@ An object is one thing on screen, and the browser shows it three ways at once:
   pack together and where the object sits among it.
 - **Pieces** — every sprite cut for the object, at its own size.
 
-Which sprites belong to which object is decided from three kinds of evidence, never
-from a list of words.
+An object in a Unity build is a prefab: it names the sprites it is made of and puts
+each one somewhere, which is all "assembled" means. The objects view was first built
+the other way round — sprites grouped by name, and an animation borrowed to show them
+together — and across five builds 17,492 of its 18,284 objects were a single sprite,
+while 1,809 prefabs each assemble two or more. Every prefab whose renderers show at
+least two sprites is now an object, drawn by `assetlab/prefabs.py` with the geometry
+the page's rig engine uses: the transform chain from the root, each sprite's pivot and
+pixels-per-unit, flips, tint, draw order, nine-slicing, a SpriteMask's window, and
+parts the prefab ships switched off left off. Prefabs that draw the same picture are
+shown once. One that draws fifty sprites or more — a screen, a map page — is listed
+after the objects, and so is one whose parts stand apart rather than overlap into one
+thing: a map page of scattered decorations, a backdrop's sky and its strip of grass.
+That is measured, not read from names: boxes that overlap or all but touch are one
+figure, and a prefab whose largest figure holds less than 60% of its parts is a scene.
+Ranked by part count alone, one build's first nine cards were map pages.
+
+What no prefab assembles is grouped from three kinds of evidence, never from a list of
+words.
 
 The first is anything the build states outright. A Spine atlas descriptor holds one
 skeleton's art and nothing else, so its regions are one object however they are named

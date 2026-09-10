@@ -44,13 +44,15 @@ function fromBuild(d){
 function objectCard(entry){
   const [o, i] = entry;
   const hero = objHero(o), members = objMembers(o);
-  const rest = members.filter(d => d !== hero).slice(0, 6);
+  // A prefab's own assembly is its face, and every one of its pieces sits beside it.
+  const face = o.pose || (hero && (hero.t || hero.img));
+  const rest = (o.pose ? members : members.filter(d => d !== hero)).slice(0, 6);
   const bits = rest.map(d =>
     `<img loading="lazy" src="${d.t || d.img}" title="${d.n}">`).join("");
   const parts = members.length - (o.w != null ? 1 : 0);
   return `<div class="card objcard" data-obj="${i}">
-    <div class="objshots">${hero
-      ? `<img loading="lazy" class="hero" src="${hero.t || hero.img}">` : ""}
+    <div class="objshots">${face
+      ? `<img loading="lazy" class="hero" src="${face}">` : ""}
       <div class="objbits">${bits}</div></div>
     <b>${o.n}</b><s>${fromBuild(hero)}${o.w != null ? "whole + " : ""}${parts} part${
       parts === 1 ? "" : "s"}${o.c != null ? " · animated" : ""}</s></div>`;
@@ -77,6 +79,17 @@ function atlasSection(o){
   // Drawing all seven turns the panel into a wall of atlases, so the sheets that
   // actually carry the object are drawn and the tail is counted rather than dropped.
   const ordered = [...byPage].sort((a, b) => b[1].length - a[1].length);
+  // Where every piece is a texture of its own there is no sheet to show, and one
+  // block per piece saying so is a wall of the same sentence.
+  const ownTexture = ([index, cuts]) => { const page = DATA[index];
+    return page && page.ac <= cuts.length && cuts.every(d => { const [x, y, w, h] = box(d);
+      return x === 0 && y === 0 && w === page.w && h === page.h; }); };
+  if (ordered.every(ownTexture)){
+    const pieces = ordered.reduce((sum, [, cuts]) => sum + cuts.length, 0);
+    return `<h3>sprite atlas <span>none</span></h3>` + note(pieces === 1
+      ? "No shared sheet: this piece ships as a texture of its own."
+      : `No shared sheet: each of these ${pieces} pieces ships as a texture of its own.`);
+  }
   const drawn = ordered.filter(([, cuts], rank) => rank < 4 && cuts.length > 1);
   const tail = ordered.length - drawn.length;
   const blocks = (drawn.length ? drawn : ordered.slice(0, 1)).map(([index, cuts]) => {
@@ -132,7 +145,8 @@ function objectPanel(o){
   const members = objMembers(o), hero = objHero(o);
   const clip = objectClip(o);
   const figures = clip && clip.layers ? figureCount(clip) : 1;
-  const how = clip ? "assembled from the clip that draws it"
+  const how = o.pose ? "as its prefab puts it together"
+            : clip ? "assembled from the clip that draws it"
             : o.w != null ? "the sprite the build ships whole"
             : "no assembled form in the build — largest piece shown";
   // Said rather than hidden: the clip is still the only assembled view there is, and
@@ -154,14 +168,21 @@ function objectPanel(o){
     ? `<p style="color:var(--dim);font-size:13px;margin:4px 0">The prefab ships these
        parts switched off — the build turns them on at run time — so they are
        drawn here as authored rather than as an empty stage.</p>` : "";
-  const final = clip && clip.layers
-    ? crowd + woken + partial + rigStage(clip) + clipControls(clip)
-    : hero ? `<img src="${hero.img}" style="max-height:260px">`
-           : `<p style="color:var(--dim)">nothing to show</p>`;
+  const moving = clip && clip.layers
+    ? crowd + woken + partial + rigStage(clip) + clipControls(clip) : "";
+  // A prefab's assembly is drawn once, as a picture. The clip its Animator plays,
+  // where it has one, runs beneath it rather than standing in for it.
+  const final = o.pose
+    ? `<div style="background:#0e1014;border-radius:8px;padding:12px;text-align:center">
+         <img src="${o.pose}" style="max-height:300px;max-width:100%"></div>`
+    : moving || (hero ? `<img src="${hero.img}" style="max-height:260px">`
+                      : `<p style="color:var(--dim)">nothing to show</p>`);
+  const motion = o.pose && moving
+    ? `<h3>animation <span>the clip its prefab plays</span></h3>${moving}` : "";
   return `<button class="close"
       onclick="stopClip();document.getElementById('panel').classList.remove('open')">close</button>
     <h2>${o.n}</h2>
-    <h3>final form <span>${how}</span></h3>${final}
+    <h3>final form <span>${how}</span></h3>${final}${motion}
     ${atlasSection(o)}
     <h3>pieces <span>${members.length} sprite${
       members.length === 1 ? "" : "s"} cut for this object</span></h3>
@@ -216,7 +237,10 @@ function objectClip(o){
   const mine = new Set(objMembers(o).map(d => d.img));
   const build = (objHero(o) || {}).g;
   const able = [];
-  for (const d of DATA){
+  // A prefab's own clips where it has them: bound through its Animator, not found
+  // by the art they happen to share.
+  const pool = o.cs && o.cs.length ? o.cs.map(i => DATA[i]).filter(Boolean) : DATA;
+  for (const d of pool){
     if (!d.layers || !d.layers.length) continue;
     if (build !== undefined && d.g !== build) continue;
     const drawn = new Set(d.layers.map(layer => layer.img));

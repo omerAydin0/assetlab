@@ -171,7 +171,20 @@ CREATE TABLE IF NOT EXISTS animations (
     layers        TEXT,   -- JSON: sprite layers; chain entries index into `nodes`
     nodes         TEXT,   -- JSON: de-duplicated transform nodes shared by the layers
     masks         TEXT,   -- JSON: SpriteMask rectangles the layers are clipped to
-    layer_count   INTEGER
+    layer_count   INTEGER,
+    holder_id     INTEGER   -- the prefab whose Animator plays it
+);
+
+CREATE TABLE IF NOT EXISTS prefab_poses (
+    prefab_id   INTEGER PRIMARY KEY,
+    sprites     TEXT,      -- JSON asset ids of the sprites it shows, back to front
+    layer_count INTEGER,
+    width       INTEGER,
+    height      INTEGER,
+    pose        TEXT,      -- the picture, relative to the catalogue folder
+    same_as     INTEGER,   -- an earlier prefab that draws the identical picture
+    figures     INTEGER,   -- separate clusters of overlapping parts it draws
+    main        REAL       -- the largest cluster's share of its parts
 );
 
 CREATE TABLE IF NOT EXISTS piece_groups (
@@ -250,6 +263,14 @@ def connect(db_path: Path) -> sqlite3.Connection:
     animation_columns = {row[1] for row in conn.execute("PRAGMA table_info(animations)")}
     if animation_columns and "masks" not in animation_columns:
         conn.execute("DROP TABLE animations")
+        conn.executescript(SCHEMA)
+    animation_columns = {row[1] for row in conn.execute("PRAGMA table_info(animations)")}
+    if animation_columns and "holder_id" not in animation_columns:
+        conn.execute("ALTER TABLE animations ADD COLUMN holder_id INTEGER")
+    # Purely derived, so an outdated shape is rebuilt by the prefabs stage.
+    pose_columns = {row[1] for row in conn.execute("PRAGMA table_info(prefab_poses)")}
+    if pose_columns and "figures" not in pose_columns:
+        conn.execute("DROP TABLE prefab_poses")
         conn.executescript(SCHEMA)
     sprite_columns = {row[1] for row in conn.execute("PRAGMA table_info(sprites)")}
     for column, decl in (("ppu", "REAL"), ("anchor_x", "REAL"), ("anchor_y", "REAL"),
