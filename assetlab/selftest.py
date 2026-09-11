@@ -1416,10 +1416,17 @@ def skeleton_checks() -> None:
             left = pose.getpixel((round(w * 0.25), round(h * 0.75)))
             right = pose.getpixel((round(w * 0.75), round(h * 0.75)))
             top = pose.getpixel((w // 2, round(h * 0.25)))
+        from .skeleton import _paint
+        canvas, _ = _paint([{"slot": 0, "image": root / "red.png", "colour": (1.0, 1.0, 1.0, 1.0),
+                             "triangles": [(((0, 0), (100, 0), (0, 100)),
+                                            ((0, 0), (400, 0.3), (200, 0)))]}],
+                           (0, -10, 400, 10))
+        sliver = canvas.getchannel("A").getbbox()
     check("its setup pose puts each region where its bone and offset say",
           (left[0] > 200 and left[2] < 60, right[2] > 200 and right[0] < 60), (True, True))
     check("and textures a mesh across its triangles", top[1] > 200 and top[0] < 60, True)
     check("three pieces drawn", drawn["pieces"], 3)
+    check("a triangle thinner than a pixel draws nothing", sliver, None)
 
 
 def small_unit_checks() -> None:

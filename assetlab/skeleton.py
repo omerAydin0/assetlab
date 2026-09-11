@@ -536,6 +536,14 @@ def _paint(drawn: list[dict], bounds: tuple) -> tuple[Image.Image, float]:
         layer = Image.new("RGBA", (width, height))
         for source, target in item["triangles"]:
             corners = [place(x, y) for x, y in target]
+            # A triangle thinner than a pixel covers no pixel centre on a GPU. Filled
+            # as a polygon it is still a one-pixel line, which is how a shading mesh
+            # ruled a stray line from a cannon's wheel to the edge of its picture.
+            (ax, ay), (bx, by), (cx, cy) = corners
+            longest = max(math.dist(corners[0], corners[1]), math.dist(corners[1], corners[2]),
+                          math.dist(corners[2], corners[0]))
+            if not longest or abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)) / longest < 1.0:
+                continue
             system = np.array([[x, y, 1.0] for x, y in corners])
             try:
                 ux = np.linalg.solve(system, [p[0] for p in source])
