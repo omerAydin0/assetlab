@@ -542,8 +542,14 @@ def report(conn: sqlite3.Connection, out_dir: Path) -> str:
         lines += [f"- `{name}`: {count} level-layers" for name, count in obstacles.most_common()]
 
     keys: Counter[str] = Counter()
-    for row in conn.execute("SELECT properties FROM levels"):
-        keys.update(json.loads(row[0]).keys())
+    # A level format with no config writes an empty string here, not "{}". One build's
+    # 5,100 levels all did, and reading them as JSON stopped the run after every stage
+    # had finished, before it wrote its diagnostics.
+    for (value,) in conn.execute("SELECT properties FROM levels WHERE properties <> ''"):
+        try:
+            keys.update(json.loads(value).keys())
+        except (ValueError, AttributeError):
+            continue
     lines += ["", "## Level config keys", ""]
     lines += [f"- `{key}`: set on {count} levels" for key, count in keys.most_common()]
 

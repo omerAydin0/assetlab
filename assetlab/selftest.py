@@ -1460,6 +1460,27 @@ def small_unit_checks() -> None:
           (width > 400, abs(width / height - 2) < 0.2), (True, True))
 
 
+def level_report_checks() -> None:
+    """A level format with no config does not stop the report."""
+    from . import levels
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = connect(Path(tmp) / "t.db")
+        try:
+            conn.executemany(
+                "INSERT INTO levels (levelset, level_no, rel_path, properties, obstacle_layers, "
+                "object_layers) VALUES (?, ?, ?, ?, '', '')",
+                [("main", 1, "a.json", ""), ("main", 2, "b.json", '{"moves": 20}')])
+            conn.commit()
+            try:
+                text = levels.report(conn, Path(tmp))
+            except Exception as problem:           # noqa: BLE001 - the failure is the finding
+                text = f"raised {type(problem).__name__}"
+        finally:
+            conn.close()
+    check("levels whose config is an empty string are reported, not fatal",
+          "`moves`: set on 1 levels" in text, True)
+
+
 def addressables_checks() -> None:
     """What a catalogue declares, against what the package it ships in holds."""
     import base64
@@ -1888,6 +1909,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     record_checks()
     skeleton_checks()
     small_unit_checks()
+    level_report_checks()
     spine_checks()
     addressables_checks()
     type_checks()

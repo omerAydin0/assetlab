@@ -15,6 +15,7 @@ for a human to remember.
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import time
 from pathlib import Path
 
@@ -100,7 +101,12 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
         results[name] = {"result": result, "seconds": round(elapsed, 1)}
 
     if "levels" not in skip:
-        levels.report(conn, out)
+        # A report, not a stage: whatever goes wrong in it must not take the run's own
+        # bookkeeping down with it.
+        try:
+            levels.report(conn, out)
+        except (ValueError, KeyError, sqlite3.Error) as problem:
+            print(f"[levels] report not written: {problem}")
     if close_after:
         conn.close()
     return results
