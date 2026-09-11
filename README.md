@@ -453,7 +453,15 @@ after the objects, and so is one whose parts stand apart rather than overlap int
 thing: a map page of scattered decorations, a backdrop's sky and its strip of grass.
 That is measured, not read from names: boxes that overlap or all but touch are one
 figure, and a prefab whose largest figure holds less than 60% of its parts is a scene.
-Ranked by part count alone, one build's first nine cards were map pages.
+So is one whose opaque pixels cover less than a fifth of its picture: map pages fill
+2–12% of their frame, objects and dialogs 50–95%, and the overlap test alone missed the
+map pages because a sprite's quad includes its transparent margin. Ranked by part count
+alone, one build's first nine cards were map pages. A picture is framed by the pixels
+actually drawn, not by the quads, so a dialog stretched to the whole screen is not a
+speck in an empty field. And it is enlarged as far as its sprites have pixels for, not
+by a fixed factor: one build lays its UI out in units a hundredth of a pixel-sized
+canvas, and a cap of four drew its dialogs forty pixels wide from art that holds three
+hundred.
 
 What no prefab assembles is grouped from three kinds of evidence, never from a list of
 words.
@@ -613,6 +621,21 @@ the report, and what is not in the package is outside what this tool reads.
 ```bash
 python -m assetlab.addressables --package <unpacked package> --out out/<name>
 ```
+
+### Spine characters, put back together
+
+A Spine character is three files: the page, a descriptor saying where each region sits
+on it, and a skeleton saying where each region goes. The regions were cut; without the
+skeleton, a character's object was its largest piece — a king's cape, and a head with
+holes where the eyes go, because the eyes are separate regions only the skeleton places.
+`assetlab/skeleton.py` reads the skeleton — binary Spine 3.8, 4.0 and 4.1, and JSON of
+any version — and draws its setup pose: bones posed as set up, each slot's setup
+attachment, region quads and mesh triangles textured from the cut regions (with the
+descriptor's stripped-margin offsets), clipping attachments applied. Each attachment
+is painted into its own layer and composited once; blending triangle by triangle
+doubled the alpha along shared edges and ruled soft shadows with dark lines. Additive
+slots are left out of the still, and constraints are not solved. One build's fifteen
+skeletons are Spine 2.1 binaries, a format that predates these, and are not posed.
 
 ### What a catalogue records about itself
 

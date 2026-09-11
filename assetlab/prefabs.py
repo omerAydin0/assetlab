@@ -33,9 +33,12 @@ from .core import connect
 
 #: One sprite on show is already on the page as itself; an object has at least two.
 MIN_PARTS = 2
-#: Longest side of a pose in pixels, and how far a small prefab may be enlarged.
+#: Longest side of a pose in pixels, and how far a small prefab may be enlarged at
+#: least. Further only as far as its sprites have pixels for: see _enlarge_limit.
 POSE_MAX = 512
 POSE_UPSCALE = 4.0
+#: How far past its sprites' own resolution a picture may be enlarged.
+SOURCE_ENLARGE = 1.5
 #: A part is never resampled larger than this, whatever a mask lets it spill to.
 PART_MAX = 4096
 PAD = 6
@@ -193,19 +196,35 @@ def _tinted(image: Image.Image, rgb: list[float], alpha: float) -> Image.Image:
                                 for channel, k in zip(channels, factors)])
 
 
-def render(layers: list[dict], art_root: Path, assets_root: Path,
-           target: Path) -> tuple[tuple[int, int], str] | None:
-    """Draw the layers into target. -> ((width, height), digest), or None."""
-    boxes = [_clipped(layer) for layer in layers]
-    live = [box for box in boxes if box[2] > box[0] and box[3] > box[1]]
-    if not live:
-        return None
-    x0, y0 = min(b[0] for b in live), min(b[1] for b in live)
-    x1, y1 = max(b[2] for b in live), max(b[3] for b in live)
+def _enlarge_limit(layers: list[dict], art_root: Path, assets_root: Path) -> float:
+    """How far a picture may be enlarged before its sprites run out of pixels.
+
+    What blurs is magnifying a sprite past its own pixels, not drawing its rect large.
+    One build lays its UI out in units a hundredth of a pixel-sized canvas - a 300-pixel
+    panel in a rect 6.8 across - and a fixed cap of four drew its dialogs forty pixels
+    wide from art that holds plenty. The limit is the median sprite's own resolution
+    over the size it is drawn at, and never less than the fixed cap.
+    """
+    ratios = []
+    for layer in layers:
+        path = (art_root / layer["img"] if layer["img"].startswith("sprites/")
+                else assets_root / layer["img"])
+        image = _source(str(path))
+        if image is None or not layer["size"][0] or not layer["size"][1]:
+            continue
+        ratios.append(max(image.width / layer["size"][0], image.height / layer["size"][1]))
+    if not ratios:
+        return POSE_UPSCALE
+    ratios.sort()
+    return max(POSE_UPSCALE, SOURCE_ENLARGE * ratios[len(ratios) // 2])
+
+
+def _draw(layers: list[dict], boxes: list[tuple], bounds: tuple, art_root: Path,
+          assets_root: Path, limit: float = POSE_UPSCALE) -> tuple[Image.Image, float]:
+    """Draw the layers onto a canvas framing `bounds`. -> (canvas, pixels per unit)"""
+    x0, y0, x1, y1 = bounds
     span = max(x1 - x0, y1 - y0)
-    if span <= 0:
-        return None
-    scale = min(POSE_MAX / span, POSE_UPSCALE)
+    scale = min(POSE_MAX / span, limit)
     width = math.ceil((x1 - x0) * scale) + 2 * PAD
     height = math.ceil((y1 - y0) * scale) + 2 * PAD
     canvas = Image.new("RGBA", (width, height))
@@ -252,9 +271,50 @@ def render(layers: list[dict], art_root: Path, assets_root: Path,
             resample=Image.BICUBIC)
         canvas.alpha_composite(piece, (rx, ry))
 
+    return canvas, scale
+
+
+def _seen(canvas: Image.Image) -> tuple | None:
+    """The box of pixels that are more than a haze."""
+    return canvas.getchannel("A").point(lambda v: 255 if v > 8 else 0).getbbox()
+
+
+def render(layers: list[dict], art_root: Path, assets_root: Path,
+           target: Path) -> tuple[tuple[int, int], str, float] | None:
+    """Draw the layers into target. -> ((width, height), digest, fill), or None.
+
+    `fill` is the share of the picture's frame its opaque pixels cover.
+    """
+    boxes = [_clipped(layer) for layer in layers]
+    live = [box for box in boxes if box[2] > box[0] and box[3] > box[1]]
+    if not live:
+        return None
+    bounds = (min(b[0] for b in live), min(b[1] for b in live),
+              max(b[2] for b in live), max(b[3] for b in live))
+    if max(bounds[2] - bounds[0], bounds[3] - bounds[1]) <= 0:
+        return None
+    limit = _enlarge_limit(layers, art_root, assets_root)
+    canvas, scale = _draw(layers, boxes, bounds, art_root, assets_root, limit)
+    seen = _seen(canvas)
+    if not seen:
+        return None
+    # A sprite's quad includes its transparent margin, and a UI tree stretched to the
+    # canvas spans the whole screen; framed by those, one build's dialogs sat as a
+    # speck in a 512-pixel field. The frame is the pixels actually drawn, and a
+    # picture that turns out much smaller than its quads is drawn again at that size.
+    inner_w, inner_h = canvas.width - 2 * PAD, canvas.height - 2 * PAD
+    if (seen[2] - seen[0]) * (seen[3] - seen[1]) < 0.8 * inner_w * inner_h:
+        visible = (bounds[0] + (seen[0] - PAD) / scale, bounds[1] + (seen[1] - PAD) / scale,
+                   bounds[0] + (seen[2] - PAD) / scale, bounds[1] + (seen[3] - PAD) / scale)
+        canvas, scale = _draw(layers, boxes, visible, art_root, assets_root, limit)
+        seen = _seen(canvas) or (0, 0, canvas.width, canvas.height)
+    canvas = canvas.crop((max(0, seen[0] - PAD), max(0, seen[1] - PAD),
+                          min(canvas.width, seen[2] + PAD), min(canvas.height, seen[3] + PAD)))
+    solid = canvas.getchannel("A").point(lambda v: 255 if v > 24 else 0).histogram()[255]
+    fill = solid / (canvas.width * canvas.height)
     target.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(target)
-    return (width, height), hashlib.sha1(canvas.tobytes()).hexdigest()
+    return canvas.size, hashlib.sha1(canvas.tobytes()).hexdigest(), fill
 
 
 def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[str, int]:
@@ -283,7 +343,7 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
         if drawn is None:
             stats["nothing"] += 1
             continue
-        (width, height), digest = drawn
+        (width, height), digest, fill = drawn
         count, main = figures(layers)
         first = seen.setdefault(digest, prefab_id)
         if first != prefab_id:
@@ -293,10 +353,11 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
             stats["drawn"] += 1
         rows.append((prefab_id, json.dumps([sprite_id[g] for g in parts if g in sprite_id]),
                      len(layers), width, height, f"poses/{first}.png",
-                     None if first == prefab_id else first, count, round(main, 3)))
+                     None if first == prefab_id else first, count, round(main, 3),
+                     round(fill, 3)))
     conn.executemany(
         "INSERT INTO prefab_poses (prefab_id, sprites, layer_count, width, height, pose, "
-        "same_as, figures, main) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        "same_as, figures, main, fill) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     conn.commit()
     _source.cache_clear()
     return stats

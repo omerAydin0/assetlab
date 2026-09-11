@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .browser import MODEL_VIEW, RIG_ENGINE, SHARED_VIEWS, web_source
 from .core import connect
-from .objects import group_objects, prefab_objects
+from .objects import attach_spine_poses, group_objects, prefab_objects
 
 MEDIA_KINDS = {"image", "audio", "animation", "font"}
 
@@ -163,6 +163,8 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
     objects = assembled + group_objects(records, [
         (position, [layer["img"] for layer in record["layers"]])
         for position, record in enumerate(records) if record.get("layers")])
+
+    attach_spine_poses(conn, objects, records, prefix)
 
     # The mesh chain, for a build that has one. Texture paths get the same game
     # prefix as sprites, so a model's surface loads from that build's folder.

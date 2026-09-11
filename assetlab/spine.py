@@ -79,9 +79,18 @@ def parse_atlas(text: str) -> list[dict]:
             return
         spin = fields.get("rotate", "false").strip().lower()
         turn = 90 if spin == "true" else 0 if spin in ("false", "") else int(spin or 0)
-        regions.append({"page": page["page"], "page_w": page["w"], "page_h": page["h"],
-                        "name": pending, "x": box[0], "y": box[1],
-                        "w": box[2], "h": box[3], "turn": turn % 360})
+        region = {"page": page["page"], "page_w": page["w"], "page_h": page["h"],
+                  "name": pending, "x": box[0], "y": box[1],
+                  "w": box[2], "h": box[3], "turn": turn % 360}
+        # Where the packer stripped transparent margins: the region's original size and
+        # where the kept part sat in it. A skeleton places the original, not the crop.
+        offsets = _numbers(fields["offsets"]) if "offsets" in fields else []
+        if len(offsets) >= 4:
+            region["offset"], region["orig"] = tuple(offsets[:2]), tuple(offsets[2:4])
+        elif "orig" in fields and "offset" in fields:
+            region["orig"] = tuple(_numbers(fields["orig"])[:2])
+            region["offset"] = tuple(_numbers(fields["offset"])[:2])
+        regions.append(region)
         pending, fields = None, {}
 
     lines = text.splitlines()
@@ -198,7 +207,11 @@ def fit_to_page(regions: list[dict], size: tuple[int, int]) -> list[dict]:
         scaled.append({**region, "page_w": wide, "page_h": tall,
                        "x": round(region["x"] * across), "y": round(region["y"] * down),
                        "w": max(1, round(region["w"] * across)),
-                       "h": max(1, round(region["h"] * down))})
+                       "h": max(1, round(region["h"] * down)),
+                       **({"orig": (region["orig"][0] * across, region["orig"][1] * down),
+                           "offset": (region["offset"][0] * across,
+                                      region["offset"][1] * down)}
+                          if "orig" in region else {})})
     return scaled
 
 
@@ -273,6 +286,32 @@ def record(conn: sqlite3.Connection, descriptor: Path, assets_root: Path,
          f"sprites/{target.name}"))
 
 
+def pose_skeleton(conn: sqlite3.Connection, descriptor: Path, assets_root: Path,
+                  out_dir: Path, pieces: dict[str, dict], stats: dict[str, int]) -> None:
+    """Draw the skeleton beside a descriptor in its setup pose, from the regions just cut."""
+    import hashlib
+    from .skeleton import draw_pose, read_skeleton, skeleton_beside
+    source = skeleton_beside(descriptor)
+    if source is None or not pieces:
+        return
+    stats["skeletons"] += 1
+    try:
+        skeleton = read_skeleton(source.read_bytes())
+    except (OSError, ValueError):
+        stats["unreadable"] += 1
+        return
+    rel = descriptor.relative_to(assets_root).as_posix()
+    stem = SAFE_RE.sub("_", descriptor.name.split(".atlas")[0])[:80]
+    target = out_dir / "poses" / f"spine_{stem}_{hashlib.sha1(rel.encode()).hexdigest()[:6]}.png"
+    drawn = draw_pose(skeleton, pieces, target)
+    if not drawn:
+        return
+    stats["posed"] += 1
+    conn.execute("INSERT OR REPLACE INTO spine_poses VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (rel, f"poses/{target.name}", drawn["size"][0], drawn["size"][1],
+                  skeleton["version"], drawn["pieces"], round(drawn["fill"], 3)))
+
+
 def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[str, int]:
     """Cut every Spine region in the export and record it as a sprite."""
     sprite_dir = out_dir / "sprites"
@@ -280,7 +319,9 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
     descriptors = sorted(set(assets_root.rglob("*.atlas.txt")) |
                          set(assets_root.rglob("*.atlas")))
     stats = {"descriptors": len(descriptors), "regions": 0, "cut": 0,
-             "no_page": 0, "out_of_bounds": 0, "reused": 0, "no_atlas": 0}
+             "no_page": 0, "out_of_bounds": 0, "reused": 0, "no_atlas": 0,
+             "skeletons": 0, "posed": 0, "unreadable": 0}
+    conn.execute("DELETE FROM spine_poses")
     if not descriptors:
         return stats
     index = image_index(assets_root)
@@ -299,6 +340,7 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
         except OSError:
             continue
         stats["regions"] += len(regions)
+        pieces: dict[str, dict] = {}
         by_page: dict[str, list[dict]] = {}
         for region in regions:
             by_page.setdefault(region["page"], []).append(region)
@@ -332,11 +374,15 @@ def build(assets_root: Path, out_dir: Path, conn: sqlite3.Connection) -> dict[st
                     else:
                         cut(sheet, region).save(target, "PNG", optimize=True)
                     record(conn, descriptor, assets_root, region, target, guid)
+                    pieces[region["name"]] = {"image": target, "w": region["w"],
+                                              "h": region["h"], "orig": region.get("orig"),
+                                              "offset": region.get("offset")}
                     stats["cut"] += 1
                     # Cut, but with no catalogued page to hang it on: the region is
                     # still art, and the atlas view will have nothing to show for it.
                     if not guid:
                         stats["no_atlas"] += 1
+        pose_skeleton(conn, descriptor, assets_root, out_dir, pieces, stats)
     conn.commit()
     return stats
 

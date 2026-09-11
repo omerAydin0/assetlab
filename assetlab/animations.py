@@ -456,7 +456,11 @@ def parse_prefab_rig(text: str) -> list[dict]:
                     node["base"][2] *= RENDER_PPU
                     node["base"][3] *= RENDER_PPU
                 else:
-                    node["base"][0] = node["base"][1] = 0.0
+                    # Its own scale is whatever the canvas gives it at run time - a
+                    # world-space canvas prefab ships 0.01 and one that animates in
+                    # ships 0 - so it is drawn at canvas pixels. Taken literally, one
+                    # build's dialogs came out forty pixels wide.
+                    node["base"][:] = [0.0, 0.0, 1.0, 1.0]
             else:
                 fixed_x = -parent_px * parent_w + (min_x + (max_x - min_x) * pivot_x) * parent_w
                 fixed_y = -parent_py * parent_h + (min_y + (max_y - min_y) * pivot_y) * parent_h

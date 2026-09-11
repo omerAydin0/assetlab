@@ -302,6 +302,11 @@ SCENE_PARTS = 50
 #: So is one whose largest cluster of overlapping parts holds less than this share of
 #: them: separate things placed apart on one canvas, not one thing put together.
 MAIN_FIGURE = 0.6
+#: And so is one whose opaque pixels cover less than this share of its picture. Map
+#: pages fill 2-12% of their frame, a few decorations scattered over a field; objects
+#: and dialogs fill 50-95%. The overlap test misses the map pages because a sprite's
+#: quad includes its transparent margin, which joins the decorations into one figure.
+SCENE_FILL = 0.2
 
 
 def prefab_objects(conn: sqlite3.Connection, records: list[dict], row_id: list[int],
@@ -315,7 +320,8 @@ def prefab_objects(conn: sqlite3.Connection, records: list[dict], row_id: list[i
     """
     try:
         rows = conn.execute(
-            """SELECT p.prefab_id, p.sprites, p.width, p.height, p.pose, p.main, a.name
+            """SELECT p.prefab_id, p.sprites, p.width, p.height, p.pose, p.main, p.fill,
+                      a.name
                  FROM prefab_poses p JOIN assets a ON a.id = p.prefab_id
                 WHERE p.same_as IS NULL""").fetchall()
     except sqlite3.OperationalError:
@@ -338,7 +344,8 @@ def prefab_objects(conn: sqlite3.Connection, records: list[dict], row_id: list[i
         sheets = Counter(records[i]["ax"] for i in parts
                          if records[i].get("ax") is not None)
         clips = clips_of.get(row["prefab_id"], [])
-        scene = len(parts) >= SCENE_PARTS or (row["main"] or 0) < MAIN_FIGURE
+        scene = (len(parts) >= SCENE_PARTS or (row["main"] or 0) < MAIN_FIGURE
+                 or (row["fill"] is not None and row["fill"] < SCENE_FILL))
         found.append({"sc": 1 if scene else 0,"n": row["name"], "w": None, "p": parts,
                       "c": clips[0] if clips else None,
                       "fam": records[parts[0]].get("mechanic")
@@ -350,3 +357,22 @@ def prefab_objects(conn: sqlite3.Connection, records: list[dict], row_id: list[i
             records[index]["pf"] = 1
     found.sort(key=lambda e: (e["sc"], -len(e["p"]), e["n"].lower()))
     return found
+
+
+def attach_spine_poses(conn: sqlite3.Connection, objects: list[dict], records: list[dict],
+                       prefix: str = "") -> None:
+    """Give the object a Spine descriptor declared its skeleton's setup pose."""
+    try:
+        poses = dict(conn.execute("SELECT descriptor, pose FROM spine_poses").fetchall())
+    except sqlite3.OperationalError:
+        return
+    if not poses:
+        return
+    for entry in objects:
+        if entry.get("pose"):
+            continue
+        members = ([entry["w"]] if entry["w"] is not None else []) + entry["p"]
+        sets = {records[index].get("set") for index in members}
+        if len(sets) == 1 and poses.get(next(iter(sets))):
+            entry["pose"] = prefix + poses[next(iter(sets))]
+            entry["pk"] = "skeleton"

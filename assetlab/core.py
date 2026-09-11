@@ -184,7 +184,18 @@ CREATE TABLE IF NOT EXISTS prefab_poses (
     pose        TEXT,      -- the picture, relative to the catalogue folder
     same_as     INTEGER,   -- an earlier prefab that draws the identical picture
     figures     INTEGER,   -- separate clusters of overlapping parts it draws
-    main        REAL       -- the largest cluster's share of its parts
+    main        REAL,      -- the largest cluster's share of its parts
+    fill        REAL       -- the share of its picture's frame that is opaque
+);
+
+CREATE TABLE IF NOT EXISTS spine_poses (
+    descriptor TEXT PRIMARY KEY,   -- the atlas descriptor, relative to the export
+    pose       TEXT,               -- the setup-pose picture, relative to the catalogue
+    width      INTEGER,
+    height     INTEGER,
+    version    TEXT,               -- the Spine version the skeleton was written by
+    pieces     INTEGER,
+    fill       REAL
 );
 
 CREATE TABLE IF NOT EXISTS piece_groups (
@@ -269,7 +280,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
         conn.execute("ALTER TABLE animations ADD COLUMN holder_id INTEGER")
     # Purely derived, so an outdated shape is rebuilt by the prefabs stage.
     pose_columns = {row[1] for row in conn.execute("PRAGMA table_info(prefab_poses)")}
-    if pose_columns and "figures" not in pose_columns:
+    if pose_columns and not {"figures", "fill"} <= pose_columns:
         conn.execute("DROP TABLE prefab_poses")
         conn.executescript(SCHEMA)
     sprite_columns = {row[1] for row in conn.execute("PRAGMA table_info(sprites)")}

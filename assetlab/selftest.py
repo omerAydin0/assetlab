@@ -1080,7 +1080,7 @@ def prefab_pose_checks() -> None:
             conn.commit()
             stats = prefabs.build(root, root, conn)
             row = conn.execute(
-                "SELECT sprites, pose, figures, main FROM prefab_poses").fetchone()
+                "SELECT sprites, pose, figures, main, fill FROM prefab_poses").fetchone()
             with Image.open(root / row["pose"]) as pose:
                 pose = pose.convert("RGBA")
                 w, h = pose.size
@@ -1088,9 +1088,19 @@ def prefab_pose_checks() -> None:
                 right = pose.getpixel((round(w * 0.8), h // 2))
                 middle = pose.getpixel((w // 2, h // 2))
             pieces = len(json.loads(row["sprites"]))
+            # The blue part turned fully transparent: its quad is still there, and the
+            # picture is framed by what is drawn, not by the quads.
+            Image.new("RGBA", (100, 100), (0, 0, 255, 0)).save(root / "sprites" / "blue.png")
+            prefabs.build(root, root, conn)
+            with Image.open(root / conn.execute(
+                    "SELECT pose FROM prefab_poses").fetchone()[0]) as framed:
+                framed_w, framed_h = framed.size
         finally:
             conn.close()          # Windows will not remove a directory it still holds
     check("a prefab with two sprites on show is drawn once", stats["drawn"], 1)
+    check("its picture knows how much of its frame it fills", 0.5 < row["fill"] < 0.8, True)
+    check("and is framed by the pixels drawn, not by the quads",
+          abs(framed_w / framed_h - 1) < 0.15, True)
     check("each part lands where the prefab puts it",
           (left[0] > 200 and left[2] < 60, right[2] > 200 and right[0] < 60), (True, True))
     check("a part the prefab ships switched off is left off", middle[3], 0)
@@ -1317,6 +1327,130 @@ def record_checks() -> None:
     check("a run records the code, the interpreter and the command",
           (set(record) >= {"assetlab_commit", "assetlab_dirty", "python", "argv"},
            record["argv"]), (True, ["assetlab", "--test"]))
+
+
+def skeleton_checks() -> None:
+    """A Spine skeleton is read in either encoding and posed from its cut regions."""
+    import json
+    import struct
+    from .skeleton import draw_pose, read_skeleton
+    from .spine import parse_atlas
+
+    def varint(n: int) -> bytes:
+        out = bytearray()
+        while True:
+            low, n = n & 0x7F, n >> 7
+            out.append(low | (0x80 if n else 0))
+            if not n:
+                return bytes(out)
+
+    def text(value: str) -> bytes:
+        data = value.encode()
+        return varint(len(data) + 1) + data
+
+    def floats(*values: float) -> bytes:
+        return struct.pack(f">{len(values)}f", *values)
+
+    white = struct.pack(">i", -1)
+
+    def body(sequence: bool) -> bytes:
+        seq = b"\x00" if sequence else b""
+
+        def region(key: int, x: float) -> bytes:
+            # key, name (none: the key), type 0, path (none: the name), transform, colour
+            return (varint(key) + varint(0) + bytes([0]) + varint(0)
+                    + floats(0, x, 0, 1, 1, 100, 100) + white + seq)
+
+        mesh = (varint(3) + varint(0) + bytes([2]) + varint(0) + white + varint(4)
+                + floats(0, 0, 1, 0, 1, 1, 0, 1) + varint(6)
+                + struct.pack(">6H", 0, 1, 2, 2, 3, 0)
+                + b"\x00" + floats(-50, 180, 50, 180, 50, 80, -50, 80) + varint(4) + seq)
+        return (floats(0, 0, 0, 0) + b"\x00"
+                + varint(3) + text("red") + text("blue") + text("green")
+                + varint(1) + text("root") + floats(0, 0, 0, 1, 1, 0, 0, 0) + varint(0) + b"\x00"
+                + varint(3)
+                + text("a") + varint(0) + white + white + varint(1) + varint(0)
+                + text("b") + varint(0) + white + white + varint(2) + varint(0)
+                + text("c") + varint(0) + white + white + varint(3) + varint(0)
+                + varint(0) + varint(0) + varint(0)
+                + varint(3)
+                + varint(0) + varint(1) + region(1, -60)
+                + varint(1) + varint(1) + region(2, 60)
+                + varint(2) + varint(1) + mesh
+                + varint(0))
+
+    modern = bytes(8) + text("4.1.24") + body(True)
+    older = text("abc") + text("3.8.99") + body(False)
+    for data, version in ((modern, "4.1.24"), (older, "3.8.99")):
+        skeleton = read_skeleton(data)
+        check(f"a Spine {version[:3]} binary skeleton is read through its skins",
+              (skeleton["version"], [slot["name"] for slot in skeleton["slots"]],
+               sorted(a["type"] for a in skeleton["skins"][0]["attachments"].values())),
+              (version, ["a", "b", "c"], ["mesh", "region", "region"]))
+    from_json = read_skeleton(json.dumps({
+        "skeleton": {"spine": "2.1.27"}, "bones": [{"name": "root"}],
+        "slots": [{"name": "a", "bone": "root", "attachment": "red"}],
+        "skins": {"default": {"a": {"red": {"width": 100, "height": 100}}}}}).encode())
+    check("and a JSON one, of any version",
+          [a["type"] for a in from_json["skins"][0]["attachments"].values()], ["region"])
+
+    atlas = chr(10).join(["page.png", "size: 256,256", "format: RGBA8888",
+                          "filter: Linear,Linear", "repeat: none", "eye", "  rotate: false",
+                          "  xy: 2, 2", "  size: 20, 10", "  orig: 40, 30", "  offset: 5, 6",
+                          "  index: -1", ""])
+    stripped = parse_atlas(atlas)[0]
+    check("a stripped region keeps its original size and where it sat in it",
+          (stripped["orig"], stripped["offset"]), ((40, 30), (5, 6)))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        regions = {}
+        for name, colour in (("red", (255, 0, 0, 255)), ("blue", (0, 0, 255, 255)),
+                             ("green", (0, 255, 0, 255))):
+            Image.new("RGBA", (100, 100), colour).save(root / f"{name}.png")
+            regions[name] = {"image": root / f"{name}.png", "w": 100, "h": 100}
+        drawn = draw_pose(read_skeleton(modern), regions, root / "pose.png")
+        with Image.open(root / "pose.png") as pose:
+            pose = pose.convert("RGBA")
+            w, h = pose.size
+            left = pose.getpixel((round(w * 0.25), round(h * 0.75)))
+            right = pose.getpixel((round(w * 0.75), round(h * 0.75)))
+            top = pose.getpixel((w // 2, round(h * 0.25)))
+    check("its setup pose puts each region where its bone and offset say",
+          (left[0] > 200 and left[2] < 60, right[2] > 200 and right[0] < 60), (True, True))
+    check("and textures a mesh across its triangles", top[1] > 200 and top[0] < 60, True)
+    check("three pieces drawn", drawn["pieces"], 3)
+
+
+def small_unit_checks() -> None:
+    """A UI laid out in tiny units is still drawn at the size its sprites can hold."""
+    from . import prefabs
+    tiny = (UI_PREFAB.replace("{x: 200, y: 100}", "{x: 2, y: 1}")
+            .replace("{x: 100, y: 100}", "{x: 1, y: 1}")
+            .replace("{x: 50, y: 0}", "{x: 0.5, y: 0}").replace("{x: -50, y: 0}", "{x: -0.5, y: 0}"))
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "sprites").mkdir()
+        for name, colour in (("red", (255, 0, 0, 255)), ("blue", (0, 0, 255, 255))):
+            Image.new("RGBA", (200, 200), colour).save(root / "sprites" / f"{name}.png")
+        (root / "Tiny.prefab").write_text(tiny, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            for guid, name in (("a" * 32, "red"), ("b" * 32, "blue")):
+                conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext, width, "
+                             "height, image_path) VALUES (?, ?, ?, 'Sprite', 'asset', 200, 200, ?)",
+                             (guid, f"{name}.asset", name, f"sprites/{name}.png"))
+                conn.execute("INSERT INTO sprites (asset_id, ppu, anchor_x, anchor_y) "
+                             "VALUES (last_insert_rowid(), 100, 0.5, 0.5)")
+            conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext) "
+                         "VALUES (?, 'Tiny.prefab', 'Tiny', 'Prefab', 'prefab')", ("9" * 32,))
+            conn.commit()
+            prefabs.build(root, root, conn)
+            width, height = conn.execute("SELECT width, height FROM prefab_poses").fetchone()
+        finally:
+            conn.close()          # Windows will not remove a directory it still holds
+    check("a UI laid out in hundredths is drawn as large as its sprites allow",
+          (width > 400, abs(width / height - 2) < 0.2), (True, True))
 
 
 def addressables_checks() -> None:
@@ -1745,6 +1879,8 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     prefab_pose_checks()
     ui_rig_checks()
     record_checks()
+    skeleton_checks()
+    small_unit_checks()
     spine_checks()
     addressables_checks()
     type_checks()

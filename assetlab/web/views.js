@@ -150,7 +150,8 @@ function objectPanel(o){
   const members = objMembers(o), hero = objHero(o);
   const clip = objectClip(o);
   const figures = clip && clip.layers ? figureCount(clip) : 1;
-  const how = o.pose ? "as its prefab puts it together"
+  const how = o.pose ? (o.pk === "skeleton" ? "as its skeleton sets it up"
+                                             : "as its prefab puts it together")
             : clip ? "assembled from the clip that draws it"
             : o.w != null ? "the sprite the build ships whole"
             : "no assembled form in the build — largest piece shown";

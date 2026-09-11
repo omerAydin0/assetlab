@@ -211,7 +211,10 @@ function rigFit(layers, nodes, duration, masks){
   const travel = Math.max(Math.max(...xs) - Math.min(...xs),
                           Math.max(...ys) - Math.min(...ys));
   const centre = [(median.b[0] + median.b[2]) / 2, (median.b[1] + median.b[3]) / 2];
-  return {fit: Math.max(0.15, Math.min(330 / (median.w * 1.15), 290 / (median.h * 1.15), 1)),
+  // Enlarged too where the rig is small: one build lays its UI out in units a
+  // hundredth of a pixel, and capping at 1 drew a dialog eleven pixels tall. The
+  // browser scales the sprites from their own pixels, so they stay sharp.
+  return {fit: Math.max(0.15, Math.min(330 / (median.w * 1.15), 290 / (median.h * 1.15), 48)),
           poseAt: median.t,
           cam: {centre, shift: [centre[0] - median.c[0], centre[1] - median.c[1]],
                 follow: travel > Math.max(median.w, median.h)}};

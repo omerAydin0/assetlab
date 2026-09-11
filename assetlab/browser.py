@@ -17,7 +17,7 @@ from pathlib import Path
 from PIL import Image
 
 from .core import connect, load_rgba, make_thumbnail
-from .objects import group_objects, prefab_objects
+from .objects import attach_spine_poses, group_objects, prefab_objects
 
 AUDIO_EXT = {"ogg", "wav", "mp3", "m4a", "aac", "flac"}
 FONT_EXT = {"ttf", "otf", "woff", "woff2"}
@@ -280,6 +280,8 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
     grouped = assembled + group_objects(records, [
         (position, [layer["img"] for layer in record["layers"]])
         for position, record in enumerate(records) if record.get("layers")])
+
+    attach_spine_poses(conn, grouped, records)
 
     # The sheet, as the page can actually show it. A Texture2D is addressed by a
     # file:// URI, which a browser refuses to load once the catalogue is served over
