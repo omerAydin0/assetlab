@@ -27,7 +27,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from .animations import MAX_RIG_LAYERS, RENDER_PPU, load_sprite_meta, parse_prefab_rig
+from .animations import (MAX_RIG_LAYERS, RENDER_PPU, border_scale, is_sliced,
+                         load_sprite_meta, parse_prefab_rig, placed_size)
 from .core import connect
 
 #: One sprite on show is already on the page as itself; an object has at least two.
@@ -129,9 +130,7 @@ def pose_layers(records: list[dict], sprite_meta: dict) -> list[dict]:
         meta = sprite_meta.get(record["guid"])
         if not meta or not meta["size"][0] or not meta["size"][1]:
             continue
-        size = meta["size"]
-        if record["draw"]:
-            size = [record["draw"][0] * RENDER_PPU, record["draw"][1] * RENDER_PPU]
+        size, anchor = placed_size(record, meta)
         window = None
         if record["mask"]:
             mask = sprite_meta.get(record["mask"]["guid"])
@@ -140,9 +139,9 @@ def pose_layers(records: list[dict], sprite_meta: dict) -> list[dict]:
                                    _local(mask["size"], mask["anchor"], 0)))
         layers.append({
             "guid": record["guid"], "img": meta["img"], "size": size,
-            "m": _mul(_chain(record["chain"]), _local(size, meta["anchor"], record["flip"])),
-            "sliced": bool(record["draw"]) and bool(meta["border"]),
-            "border": meta["border"], "border_scale": meta["border_scale"],
+            "m": _mul(_chain(record["chain"]), _local(size, anchor, record["flip"])),
+            "sliced": is_sliced(record, meta),
+            "border": meta["border"], "border_scale": border_scale(record, meta),
             "rgb": record["rgb"], "tint": record["tint"], "on": record["on"],
             "window": window})
     # A prefab whose every part is switched off is one the game fills in at run time;

@@ -420,3 +420,53 @@ def make_thumbnail(image: Image.Image, target: Path, size: int = 224) -> None:
     canvas.alpha_composite(thumb, ((size - thumb.width) // 2, (size - thumb.height) // 2))
     target.parent.mkdir(parents=True, exist_ok=True)
     canvas.convert("RGB").save(target, "JPEG", quality=88, optimize=True)
+
+
+def prune_dependents(conn: sqlite3.Connection) -> dict[str, int]:
+    """Delete every row that names an asset the catalogue no longer holds.
+
+    Read from the schema rather than listed, so a table added later is covered without
+    anyone remembering to add it here. A clip whose holder prefab is gone keeps the
+    clip and forgets the holder. -> {table.column: rows}
+    """
+    removed: dict[str, int] = {}
+    for (table,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name != 'assets'").fetchall():
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info([{table}])")}
+        for column in ("asset_id", "prefab_id", "holder_id"):
+            if column not in columns:
+                continue
+            verb = (f"UPDATE [{table}] SET {column} = NULL" if column == "holder_id"
+                    else f"DELETE FROM [{table}]")
+            cursor = conn.execute(f"{verb} WHERE {column} IS NOT NULL "
+                                  f"AND {column} NOT IN (SELECT id FROM assets)")
+            if cursor.rowcount:
+                removed[f"{table}.{column}"] = cursor.rowcount
+    return removed
+
+
+def run_record(argv: list[str] | None = None) -> dict:
+    """What produced a catalogue: the code, the interpreter and the command line.
+
+    Two months on, a folder of results is only worth as much as the answer to "made
+    from what, by which version". The package's own git commit answers the second,
+    with a flag when the working tree held changes the commit does not.
+    """
+    import platform
+    import subprocess
+    import sys
+    from datetime import datetime, timezone
+    package = Path(__file__).resolve().parent.parent
+
+    def git(*args: str) -> str:
+        try:
+            return subprocess.run(["git", "-C", str(package), *args], capture_output=True,
+                                  text=True, timeout=15).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    return {"utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "assetlab_commit": git("rev-parse", "HEAD") or None,
+            "assetlab_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+            "python": platform.python_version(),
+            "argv": list(sys.argv if argv is None else argv)}

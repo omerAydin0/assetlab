@@ -566,6 +566,35 @@ def prune_orphans(database: Path) -> dict[str, int]:
     return removed
 
 
+#: Below this many clips with curves the share says little either way.
+ANIMATION_MIN_CLIPS = 20
+#: A build drawing fewer than this share of its curve-carrying clips has an animation
+#: system the rig does not read, not a handful of odd clips.
+ANIMATION_DRAWN_FLOOR = 0.25
+
+
+def animation_coverage(database: Path) -> dict[str, int] | None:
+    """How many clips carry curves, how many are drawn, and how many rigs are bound."""
+    if not database.is_file():
+        return None
+    conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        def count(where: str) -> int:
+            return conn.execute(f"SELECT COUNT(*) FROM animations WHERE {where}").fetchone()[0]
+        found = {"curves": count("curve_summary IS NOT NULL OR frame_count > 0"),
+                 "drawn": count("layer_count > 0 OR frame_count > 0"),
+                 "rigged": count("layer_count > 0")}
+        try:
+            found["bound"] = count("layer_count > 0 AND holder_id IS NOT NULL")
+        except sqlite3.OperationalError:
+            found["bound"] = 0
+        return found
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+
+
 def catalogue_metrics(database: Path) -> dict[str, float] | None:
     """Read one catalogue's numbers, or None if it is not one."""
     if not database.is_file():
@@ -639,12 +668,14 @@ def diagnose_outcome(out: Path, peers: list[Path] | None = None) -> Diagnosis:
     # the package does not ship. The library covers the files it was given; this says
     # how much of the game that is.
     declared_path = out / "addressables.json"
+    declared_bundles = 0
     if declared_path.is_file():
         from .addressables import describe
         try:
             summary = json.loads(declared_path.read_text(encoding="utf-8"))["summary"]
         except (OSError, ValueError, KeyError):
             summary = None
+        declared_bundles = (summary or {}).get("bundles", 0)
         if summary and (summary["remote"] or summary["local_missing"]):
             result.add(WARN, describe(summary),
                        "those bundles are fetched at run time and are not in the files "
@@ -688,6 +719,31 @@ def diagnose_outcome(out: Path, peers: list[Path] | None = None) -> Diagnosis:
                    f"{visual - placed:.0f} of {visual:.0f} images carry no role evidence "
                    f"({open_share:.2f}) and are left unlabelled rather than guessed",
                    advice.strip() or None)
+
+    # A build that ships bundles and a catalogue that recorded none of them: the
+    # labels are there, the provenance is not.
+    if declared_bundles and not carried:
+        result.add(WARN, f"the package declares {declared_bundles} Addressables bundles "
+                         f"and no bundle provenance was recorded",
+                   "run with --primary-export (or pass --primary-content) so each asset "
+                   "carries the bundle that ships it")
+
+    # Reported, not asserted: how much of the build's animation is drawn. A clip with
+    # curves that neither swaps sprites nor composes into a rig is listed as text, and
+    # one build's 169 such clips drew nothing until its uGUI animation was read.
+    coverage = animation_coverage(out / "assetlab.db")
+    if coverage and coverage["curves"] >= ANIMATION_MIN_CLIPS:
+        share = coverage["drawn"] / coverage["curves"]
+        text = (f"{coverage['drawn']} of {coverage['curves']} clips with curves are drawn "
+                f"({share:.2f}); {coverage['bound']} of {coverage['rigged']} rigs are "
+                f"bound to the prefab that plays them")
+        if share < ANIMATION_DRAWN_FLOOR:
+            result.add(WARN, text,
+                       "the rest animate what the rig does not reproduce - text, masks, "
+                       "rect sizes, particles, meshes - or play on a prefab that is not "
+                       "in these files. The animations tab shows only the drawn ones.")
+        else:
+            result.add(OK, text)
 
     # Integrity: rows naming an asset the catalogue no longer holds.
     stale = orphan_rows(out / "assetlab.db")

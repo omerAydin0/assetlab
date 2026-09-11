@@ -1099,6 +1099,226 @@ def prefab_pose_checks() -> None:
           (row["figures"], row["main"]), (2, 0.5))
 
 
+UI_PREFAB = """%YAML 1.1
+--- !u!1 &100
+GameObject:
+  m_Name: Card
+  m_IsActive: 1
+--- !u!224 &400
+RectTransform:
+  m_GameObject: {fileID: 100}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 401}
+  - {fileID: 402}
+  m_Father: {fileID: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 200, y: 100}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!95 &95001
+Animator:
+  m_GameObject: {fileID: 100}
+  m_Controller: {fileID: 9100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!1 &101
+GameObject:
+  m_Name: Left
+  m_IsActive: 1
+--- !u!224 &401
+RectTransform:
+  m_GameObject: {fileID: 101}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+  m_AnchorMin: {x: 0, y: 0.5}
+  m_AnchorMax: {x: 0, y: 0.5}
+  m_AnchoredPosition: {x: 50, y: 0}
+  m_SizeDelta: {x: 100, y: 100}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!114 &114001
+MonoBehaviour:
+  m_GameObject: {fileID: 101}
+  m_Enabled: 1
+  m_Color: {r: 1, g: 1, b: 1, a: 1}
+  m_Sprite: {fileID: 21300000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+  m_Type: 0
+  m_PreserveAspect: 0
+  m_FillMethod: 4
+  m_PixelsPerUnitMultiplier: 1
+--- !u!1 &102
+GameObject:
+  m_Name: Right
+  m_IsActive: 1
+--- !u!224 &402
+RectTransform:
+  m_GameObject: {fileID: 102}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Father: {fileID: 400}
+  m_AnchorMin: {x: 1, y: 0.5}
+  m_AnchorMax: {x: 1, y: 0.5}
+  m_AnchoredPosition: {x: -50, y: 0}
+  m_SizeDelta: {x: 100, y: 100}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!114 &114002
+MonoBehaviour:
+  m_GameObject: {fileID: 102}
+  m_Enabled: 1
+  m_Color: {r: 1, g: 1, b: 1, a: 1}
+  m_Sprite: {fileID: 21300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+  m_Type: 0
+  m_PreserveAspect: 0
+  m_FillMethod: 4
+  m_PixelsPerUnitMultiplier: 1
+"""
+
+# A clip that lifts the left card by 30 canvas pixels, the way uGUI animates.
+UI_CLIP = """%YAML 1.1
+--- !u!74 &7400000
+AnimationClip:
+  m_Name: Lift
+  m_PositionCurves: []
+  m_FloatCurves:
+  - curve:
+      serializedVersion: 2
+      m_Curve:
+      - serializedVersion: 3
+        time: 0
+        value: 0
+      - serializedVersion: 3
+        time: 1
+        value: 30
+    attribute: m_AnchoredPosition.y
+    path: Left
+    classID: 224
+  m_PPtrCurves: []
+  m_SampleRate: 60
+"""
+
+
+def ui_rig_checks() -> None:
+    """A uGUI tree is laid out by its anchors, drawn, and moved by its anchored position."""
+    import json
+    from . import animations, prefabs
+    records = parse_prefab_rig(UI_PREFAB)
+    check("a uGUI Image is a layer like a sprite renderer", [r["path"] for r in records],
+          ["Left", "Right"])
+    check("each is placed by its anchors and anchored position",
+          [r["chain"][-1]["base"][:2] for r in records], [[-0.5, 0.0], [0.5, 0.0]])
+    check("and fills its rect", records[0]["draw"], [1.0, 1.0])
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "sprites").mkdir()
+        for name, colour in (("red", (255, 0, 0, 255)), ("blue", (0, 0, 255, 255))):
+            Image.new("RGBA", (40, 40), colour).save(root / "sprites" / f"{name}.png")
+        (root / "Card.prefab").write_text(UI_PREFAB, encoding="utf-8")
+        (root / "Lift.anim").write_text(UI_CLIP, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            for guid, path, kind, ext, image in (
+                    ("a" * 32, "red.asset", "Sprite", "asset", "sprites/red.png"),
+                    ("b" * 32, "blue.asset", "Sprite", "asset", "sprites/blue.png"),
+                    ("f" * 32, "Lift.anim", "AnimationClip", "anim", None),
+                    ("c" * 32, "Lift.controller", "AnimatorController", "controller", None),
+                    ("9" * 32, "Card.prefab", "Prefab", "prefab", None)):
+                conn.execute("INSERT INTO assets (guid, rel_path, name, unity_type, ext, "
+                             "width, height, image_path) VALUES (?, ?, ?, ?, ?, 40, 40, ?)",
+                             (guid, path, path.split(".")[0], kind, ext, image))
+            ids = dict(conn.execute("SELECT guid, id FROM assets").fetchall())
+            for guid in ("a" * 32, "b" * 32):
+                conn.execute("INSERT INTO sprites (asset_id, ppu, anchor_x, anchor_y) "
+                             "VALUES (?, 100, 0.5, 0.5)", (ids[guid],))
+            conn.execute("INSERT INTO refs VALUES (?, ?)", ("c" * 32, "f" * 32))
+            conn.execute("INSERT INTO used_by VALUES (?, ?, 'Card', 'Prefab')",
+                         (ids["f" * 32], "9" * 32))
+            conn.commit()
+            prefabs.build(root, root, conn)
+            pose_path = conn.execute("SELECT pose FROM prefab_poses").fetchone()[0]
+            with Image.open(root / pose_path) as pose:
+                pose = pose.convert("RGBA")
+                w, h = pose.size
+                left, right = pose.getpixel((w // 4, h // 2)), pose.getpixel((3 * w // 4, h // 2))
+            animations.build(root, conn)
+            layers, nodes = (json.loads(v) for v in conn.execute(
+                "SELECT layers, nodes FROM animations WHERE asset_id = ?",
+                (ids["f" * 32],)).fetchone())
+        finally:
+            conn.close()          # Windows will not remove a directory it still holds
+    check("its still has each sprite filling its own half",
+          (left[0] > 200 and left[2] < 60, right[2] > 200 and right[0] < 60), (True, True))
+    lifted = next(layer for layer in layers if layer["name"] == "Left")
+    check("an anchored-position curve moves the part from where its anchors put it",
+          nodes[lifted["chain"][-1]]["pos"], [[0.0, -0.5, 0.0, 0.0], [1.0, -0.5, 0.3, 0.0]])
+
+
+def record_checks() -> None:
+    """A re-run mirrors its export; bundle records and the run itself are recorded."""
+    import json
+    from .classify import bundle_records
+    from .core import prune_dependents, run_record
+    from .doctor import WARN, diagnose_outcome
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "Assets"
+        (root / "Sprite").mkdir(parents=True)
+        (root / "Spine").mkdir()
+        for name in ("keep", "gone"):
+            (root / "Sprite" / f"{name}.asset").write_text("%YAML 1.1", encoding="utf-8")
+        (root / "Spine" / "hero.atlas").write_text("hero.png", encoding="utf-8")
+        conn = connect(Path(tmp) / "t.db")
+        try:
+            build_index(root, conn)
+            ids = dict(conn.execute("SELECT name, id FROM assets").fetchall())
+            conn.execute("INSERT INTO assets (rel_path, name, unity_type) "
+                         "VALUES ('Spine/hero.atlas#arm', 'arm', 'Sprite')")
+            conn.execute("INSERT INTO tags VALUES (?, 'role', 'UI', 'high', 'graph')",
+                         (ids["gone"],))
+            conn.commit()
+            (root / "Sprite" / "gone.asset").unlink()
+            build_index(root, conn)
+            names = {row[0] for row in conn.execute("SELECT name FROM assets")}
+            tags = conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]
+            left = prune_dependents(conn)
+        finally:
+            conn.close()          # Windows will not remove a directory it still holds
+        check("a file gone from the export takes its row with it",
+              ("gone" in names, "keep" in names), (False, True))
+        check("and every row that named it", (tags, left), (0, {}))
+        check("a region cut from a file that is still there stays", "arm" in names, True)
+
+        records = Path(tmp) / "Primary" / "AssetBundle"
+        records.mkdir(parents=True)
+        (records / "ui_shop.json").write_text(json.dumps(
+            {"m_AssetBundleName": "ui_shop",
+             "m_Container": {"Assets/UI/Shop/ShopDialog.prefab": {},
+                             "Assets/UI/Shop/ShopAtlas.spriteatlas": {}}}), encoding="utf-8")
+        check("every entry of every bundle record is kept as a record",
+              sorted(bundle_records(Path(tmp) / "Primary")),
+              [("ui_shop", "Assets/UI/Shop/ShopAtlas.spriteatlas"),
+               ("ui_shop", "Assets/UI/Shop/ShopDialog.prefab")])
+
+        out = Path(tmp) / "out"
+        conn = connect(out / "assetlab.db")
+        try:
+            conn.execute("INSERT INTO assets (rel_path, name) VALUES ('a.png', 'a')")
+            conn.executemany("INSERT INTO animations (asset_id, curve_summary, layer_count, "
+                             "frame_count) VALUES (?, 'position', 0, 0)",
+                             [(1000 + i,) for i in range(30)])
+            conn.commit()
+        finally:
+            conn.close()
+        report = diagnose_outcome(out, peers=[])
+    check("a build whose clips carry curves and draw nothing is warned about",
+          any(c.status == WARN and "clips with curves are drawn" in c.message
+              for c in report.checks), True)
+    record = run_record(["assetlab", "--test"])
+    check("a run records the code, the interpreter and the command",
+          (set(record) >= {"assetlab_commit", "assetlab_dirty", "python", "argv"},
+           record["argv"]), (True, ["assetlab", "--test"]))
+
+
 def addressables_checks() -> None:
     """What a catalogue declares, against what the package it ships in holds."""
     import base64
@@ -1523,6 +1743,8 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     animator_binding_checks()
     rotation_unwrap_checks()
     prefab_pose_checks()
+    ui_rig_checks()
+    record_checks()
     spine_checks()
     addressables_checks()
     type_checks()

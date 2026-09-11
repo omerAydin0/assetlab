@@ -369,6 +369,15 @@ being right about the geometry:
   stands on, strip of ground and all. Name matching is left for a prefab whose Animator
   is not in its own file, which is 11 clips.
 
+- **uGUI.** A RectTransform is laid out the way Unity lays it out — two anchor
+  points on the parent's rect, the pivot weighing a point between them, the anchored
+  position offsetting from there — and an Image fills its rect, sliced by the canvas's
+  reference pixels per unit, or fitted inside it when it preserves aspect. uGUI draws
+  after every sprite renderer, in hierarchy order. It animates `m_AnchoredPosition`
+  rather than the Transform, which is why one build's 170 clips drew nothing until this
+  was read; an Image's `m_Enabled` curve switches it. Text, masks, `m_SizeDelta` and
+  `CanvasGroup` fades are not reproduced.
+
 Motion is sampled linearly between keyframes; Unity eases with bezier tangents, so
 this is an approximation. A rotation stored as quaternions is unwrapped, so a turn past
 half a turn keeps going instead of spinning back the long way. Additive blending,
@@ -604,6 +613,26 @@ the report, and what is not in the package is outside what this tool reads.
 ```bash
 python -m assetlab.addressables --package <unpacked package> --out out/<name>
 ```
+
+### What a catalogue records about itself
+
+Every analysis writes a `run` record into the catalogue's `meta` table: the AssetLab
+commit it ran from (and whether the working tree held uncommitted changes), the Python
+version, the command line, the export it read and the stages it skipped. A run from a
+package adds a `fingerprint` to its `provenance`: the SHA-256 of every package file it
+read and of the AssetRipper executable that read them, and whether a Primary Content
+export was taken. A folder of results can then answer "made from which files, by which
+code" without anyone remembering.
+
+A catalogue mirrors the export it was built from. Re-indexing removes the rows of files
+that are gone, and every row naming them — tags, sprite rects, usage, clips — rather than
+leaving them to be counted as art the build ships. The `bundles` table holds each
+bundle record's entries, rebuilt with the provenance tags it justifies.
+
+`doctor` reports how much of a build's animation is drawn — clips with curves against
+clips that swap sprites or compose into a rig — and warns below a quarter, and it
+warns when a package declares Addressables bundles but no bundle provenance was
+recorded.
 
 ### When a build's sprites cannot be placed at all
 

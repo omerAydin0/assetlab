@@ -122,7 +122,10 @@ def parse_float_curves(text: str) -> dict[str, dict[str, list]]:
             continue
         name = attribute.group(1)
         kind = ("alpha" if name.endswith("m_Color.a")
-                else "active" if name == "m_IsActive" else None)
+                else "active" if name == "m_IsActive"
+                else "ax" if name == "m_AnchoredPosition.x"
+                else "ay" if name == "m_AnchoredPosition.y"
+                else "enabled" if name == "m_Enabled" else None)
         if not kind:
             continue
         keys = [[round(float(t), 4), round(float(v), 4)]
@@ -183,6 +186,88 @@ def quaternion_z_degrees(x: float, y: float, z: float, w: float) -> float:
     return math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
 
 
+# A uGUI Image, recognised by the shape of its fields rather than by its script's name:
+# nothing else carries a sprite, a fill method and a pixels-per-unit multiplier.
+FILL_METHOD_RE = re.compile(r"^  m_FillMethod:", re.M)
+IMAGE_TYPE_RE = re.compile(r"^  m_Type:\s*(\d)", re.M)
+PRESERVE_RE = re.compile(r"^  m_PreserveAspect:\s*(\d)", re.M)
+PPU_MULTIPLIER_RE = re.compile(rf"^  m_PixelsPerUnitMultiplier:\s*({NUM})", re.M)
+REFERENCE_SIZE_RE = re.compile(
+    rf"^  m_ReferenceResolution:\s*\{{x:\s*({NUM}),\s*y:\s*({NUM})\}}", re.M)
+REFERENCE_PPU_RE = re.compile(rf"^  m_ReferencePixelsPerUnit:\s*({NUM})", re.M)
+#: Where a prefab's UI is laid out against the whole canvas and names no reference
+#: resolution of its own, a portrait phone screen is assumed.
+DEFAULT_CANVAS = (1080.0, 1920.0)
+#: uGUI draws after every sprite renderer, in hierarchy order.
+UI_SORT = 10 ** 9
+
+
+def _pair(field: str, body: str, default: float) -> tuple[float, float]:
+    match = re.search(rf"^  {field}:\s*\{{x:\s*({NUM}),\s*y:\s*({NUM})", body, re.M)
+    return (float(match.group(1)), float(match.group(2))) if match else (default, default)
+
+
+def placed_size(record: dict, meta: dict) -> tuple[list[float], list[float]]:
+    """How large a renderer draws its sprite, and where the pivot sits in it.
+
+    A sprite renderer draws the sprite at its own size about the sprite's pivot, or
+    stretched to m_Size when sliced or tiled. A uGUI Image fills its rect about the
+    rect's pivot, and one that preserves aspect fits the sprite inside the rect,
+    centred.
+    """
+    anchor = list(record.get("anchor") or meta["anchor"])
+    if not record["draw"]:
+        return list(meta["size"]), anchor
+    size = [record["draw"][0] * RENDER_PPU, record["draw"][1] * RENDER_PPU]
+    if record.get("aspect") and meta["size"][0] and meta["size"][1] and size[0] and size[1]:
+        k = min(size[0] / meta["size"][0], size[1] / meta["size"][1])
+        fitted = [meta["size"][0] * k, meta["size"][1] * k]
+        anchor = [0.5 - (0.5 - anchor[0]) * size[0] / fitted[0],
+                  0.5 - (0.5 - anchor[1]) * size[1] / fitted[1]]
+        size = fitted
+    return size, anchor
+
+
+def is_sliced(record: dict, meta: dict) -> bool:
+    if "slice" in record:
+        return bool(record["slice"]) and bool(meta["border"])
+    return bool(record["draw"]) and bool(meta["border"])
+
+
+def border_scale(record: dict, meta: dict) -> float:
+    """Rendered pixels per source pixel of a nine-slice border."""
+    return meta["border_scale"] * record.get("border_factor", 1.0)
+
+
+def ui_track(node: dict, floats: dict | None) -> list | None:
+    """A RectTransform's position over a clip, from its anchored-position curves.
+
+    uGUI animates m_AnchoredPosition, not m_LocalPosition, so the Transform curves a
+    sprite rig moves by are simply absent - which is why one build's 170 clips drew
+    nothing. The pivot sits at a fixed point set by the anchors plus the anchored
+    position, so the curve is that fixed point plus the animated offset.
+    """
+    if not floats or "ui" not in node or not (floats.get("ax") or floats.get("ay")):
+        return None
+    fixed_x, fixed_y, rest_x, rest_y = node["ui"]
+    xs, ys = floats.get("ax"), floats.get("ay")
+
+    def at(keys: list | None, t: float, rest: float) -> float:
+        if not keys:
+            return rest
+        if t <= keys[0][0]:
+            return keys[0][1]
+        for a, b in zip(keys, keys[1:]):
+            if t <= b[0]:
+                span = b[0] - a[0]
+                return a[1] + (b[1] - a[1]) * ((t - a[0]) / span if span else 0.0)
+        return keys[-1][1]
+
+    times = sorted({k[0] for k in xs or []} | {k[0] for k in ys or []})
+    return [[t, round((fixed_x + at(xs, t, rest_x)) / RENDER_PPU, 4),
+             round((fixed_y + at(ys, t, rest_y)) / RENDER_PPU, 4), 0.0] for t in times]
+
+
 def parse_prefab_rig(text: str) -> list[dict]:
     """One record per drawable SpriteRenderer, in back-to-front order.
 
@@ -203,6 +288,9 @@ def parse_prefab_rig(text: str) -> list[dict]:
     renderers: dict[str, dict] = {}
     masks: dict[str, str] = {}                   # gameObject fileID -> mask sprite guid
     groups: dict[str, tuple[int, int]] = {}      # gameObject fileID -> SortingGroup key
+    rects: dict[str, dict] = {}                  # RectTransform fileID -> its layout
+    images: dict[str, dict] = {}                 # gameObject fileID -> uGUI Image
+    canvas: dict = {}                            # a CanvasScaler's reference, if any
 
     for class_id, file_id, body in docs:
         if class_id == 1:
@@ -234,6 +322,35 @@ def parse_prefab_rig(text: str) -> list[dict]:
             }
             if class_id == 224:
                 ui_transforms.add(file_id)
+                rects[file_id] = {"amin": _pair("m_AnchorMin", body, 0.5),
+                                  "amax": _pair("m_AnchorMax", body, 0.5),
+                                  "pos": _pair("m_AnchoredPosition", body, 0.0),
+                                  "size": _pair("m_SizeDelta", body, 100.0),
+                                  "pivot": _pair("m_Pivot", body, 0.5)}
+        elif class_id == 114:
+            owner = GAMEOBJECT_REF_RE.search(body)
+            reference = REFERENCE_SIZE_RE.search(body)
+            if reference:
+                canvas["size"] = (float(reference.group(1)), float(reference.group(2)))
+                ppu = REFERENCE_PPU_RE.search(body)
+                if ppu:
+                    canvas["ppu"] = float(ppu.group(1))
+            sprite = SPRITE_REF_RE.search(body)
+            if owner and sprite and FILL_METHOD_RE.search(body):
+                enabled = ENABLED_RE.search(body)
+                colour = COLOR_RE.search(body)
+                kind = IMAGE_TYPE_RE.search(body)
+                multiplier = PPU_MULTIPLIER_RE.search(body)
+                images[owner.group(1)] = {
+                    "guid": sprite.group(1),
+                    "on": not (enabled and enabled.group(1) == "0"),
+                    "rgb": ([round(float(colour.group(i)), 4) for i in (1, 2, 3)]
+                            if colour else [1.0, 1.0, 1.0]),
+                    "tint": float(colour.group(4)) if colour else 1.0,
+                    "slice": bool(kind) and kind.group(1) == "1",
+                    "aspect": bool(PRESERVE_RE.search(body))
+                    and PRESERVE_RE.search(body).group(1) == "1",
+                    "multiplier": float(multiplier.group(1)) if multiplier else 1.0}
         elif class_id == 331:
             owner = GAMEOBJECT_REF_RE.search(body)
             sprite = SPRITE_REF_RE.search(body)
@@ -303,15 +420,51 @@ def parse_prefab_rig(text: str) -> list[dict]:
     records: list[dict] = []
     counter = 0
 
+    canvas_w, canvas_h = canvas.get("size", DEFAULT_CANVAS)
+    reference_ppu = canvas.get("ppu", 100.0)
+
     def walk(file_id: str, segments: list[str], chain: list[dict],
              group: tuple[int, int] | None, visible: bool, seen: frozenset,
-             mask: dict | None, ids: list[str]) -> None:
+             mask: dict | None, ids: list[str],
+             frame: tuple[float, float, float, float] | None = None) -> None:
         nonlocal counter
         record = transforms[file_id]
         gameobject = record["go"]
-        chain = chain + [{"path": "/".join(segments),
-                          "base": [record["x"], record["y"], record["sx"], record["sy"]],
-                          "rot": record["rot"]}]
+        node = {"path": "/".join(segments),
+                "base": [record["x"], record["y"], record["sx"], record["sy"]],
+                "rot": record["rot"]}
+        own_frame = None
+        rect = rects.get(file_id)
+        if rect:
+            # A RectTransform is laid out against its parent's rect: the anchors mark
+            # two points on it, the pivot weighs a point between them, and the anchored
+            # position offsets from there. Positions are canvas pixels, carried as
+            # hundredths so the rig's pixels-per-unit brings them back to pixels.
+            (min_x, min_y), (max_x, max_y) = rect["amin"], rect["amax"]
+            if frame is None:
+                parent_w, parent_h, parent_px, parent_py = canvas_w, canvas_h, 0.5, 0.5
+            else:
+                parent_w, parent_h, parent_px, parent_py = frame
+            width = rect["size"][0] + (max_x - min_x) * parent_w
+            height = rect["size"][1] + (max_y - min_y) * parent_h
+            pivot_x, pivot_y = rect["pivot"]
+            if frame is None:
+                # The top of a UI tree: in a prefab of its own it is the canvas; below
+                # a world transform it is a world-space canvas, whose scale turns its
+                # pixels into world units.
+                if record["father"] != "0":
+                    node["base"][2] *= RENDER_PPU
+                    node["base"][3] *= RENDER_PPU
+                else:
+                    node["base"][0] = node["base"][1] = 0.0
+            else:
+                fixed_x = -parent_px * parent_w + (min_x + (max_x - min_x) * pivot_x) * parent_w
+                fixed_y = -parent_py * parent_h + (min_y + (max_y - min_y) * pivot_y) * parent_h
+                node["base"][0] = (fixed_x + rect["pos"][0]) / RENDER_PPU
+                node["base"][1] = (fixed_y + rect["pos"][1]) / RENDER_PPU
+                node["ui"] = [fixed_x, fixed_y, rect["pos"][0], rect["pos"][1]]
+            own_frame = (width, height, pivot_x, pivot_y)
+        chain = chain + [node]
         visible = visible and active.get(gameobject, True)
         group = groups.get(gameobject, group)
         ids = ids + [file_id]
@@ -336,16 +489,32 @@ def parse_prefab_rig(text: str) -> list[dict]:
                             "sort": ((group or (renderer["layer"], renderer["order"])),
                                      renderer["layer"], renderer["order"],
                                      -record["z"], counter)})
+        image = images.get(gameobject) if own_frame else None
+        if image and image["on"]:
+            counter += 1
+            width, height, pivot_x, pivot_y = own_frame
+            records.append({
+                "guid": image["guid"], "path": chain[-1]["path"], "chain": chain,
+                "draw": [width / RENDER_PPU, height / RENDER_PPU],
+                # CSS measures the pivot down from the top; Unity measures it up.
+                "anchor": [pivot_x, 1.0 - pivot_y], "slice": image["slice"],
+                "aspect": image["aspect"],
+                # A sliced Image scales its border by the canvas's reference pixels
+                # per unit over the sprite's, divided by its own multiplier.
+                "border_factor": reference_ppu / RENDER_PPU / (image["multiplier"] or 1.0),
+                "flip": 0, "rgb": image["rgb"], "tint": image["tint"],
+                "layer": 0, "order": 0, "inside_mask": False, "mask": None,
+                "on": visible, "z": 0.0,
+                "sort": ((UI_SORT, 0), UI_SORT, 0, 0.0, counter)})
         for child in record["children"]:
-            # A Canvas subtree lays out in screen space against a rect, not in world
-            # units, so composing it into a world rig would scatter its parts.
-            if child in transforms and child not in seen and child not in ui_transforms:
+            if child in transforms and child not in seen:
+                # A RectTransform under a plain Transform starts a UI tree of its own.
                 walk(child, segments + [names.get(transforms[child]["go"], "")],
-                     chain, group, visible, seen | {child}, mask, ids)
+                     chain, group, visible, seen | {child}, mask, ids,
+                     own_frame if child in rects else None)
 
     for root in roots:
-        if root not in ui_transforms:
-            walk(root, [], [], None, True, frozenset({root}), None, [])
+        walk(root, [], [], None, True, frozenset({root}), None, [])
     records.sort(key=lambda record: record["sort"])
     return records
 
@@ -542,7 +711,9 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
         node_pool: list[dict] = []
         mask_pool: list[dict] = []
         chosen: str | None = None
-        if not frames and parsed["transforms"]:
+        # uGUI moves by float curves alone, so a clip with no Transform curve can still
+        # be a rig.
+        if not frames and (parsed["transforms"] or parsed["floats"]):
             # Several prefabs may share a clip. Since every sprite in the rig is
             # drawn, take the single prefab that best explains the animated paths
             # rather than merging them and pulling in art from a different object.
@@ -642,6 +813,9 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
                                       ("scale", "scale")):
                         if curves.get(name):
                             entry[key] = curves[name]
+                    moved = ui_track(node, floats_at.get(node["path"]))
+                    if moved:
+                        entry["pos"] = moved
                     ids.append(node_id(entry))
                 return ids
 
@@ -680,25 +854,29 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
                                       ("scale", "scale")):
                         if curves.get(name):
                             entry[key] = curves[name]
+                    moved = ui_track(node, floats_at.get(node["path"]))
+                    if moved:
+                        entry["pos"] = moved
                     chain.append(node_id(entry))
                     # An ancestor being switched off hides everything beneath it.
                     toggle = (floats_at.get(node["path"]) or {}).get("active")
                     if toggle:
                         toggles.append(toggle)
-                size = meta["size"]
-                if record["draw"]:
-                    size = [round(record["draw"][0] * RENDER_PPU, 2),
-                            round(record["draw"][1] * RENDER_PPU, 2)]
+                # A component switched off by the clip hides its own renderer.
+                own = (floats_at.get(record["path"]) or {}).get("enabled")
+                if own:
+                    toggles.append(own)
+                size, anchor = placed_size(record, meta)
                 layer = {"name": record["path"], "img": meta["img"],
-                         "size": size, "chain": chain}
-                if record["draw"] and meta["border"]:
+                         "size": [round(size[0], 2), round(size[1], 2)], "chain": chain}
+                if is_sliced(record, meta):
                     left, bottom, right, top = meta["border"]
+                    scale = border_scale(record, meta)
                     layer["bord"] = [
                         [round(v, 2) for v in (top, right, bottom, left)],
-                        [round(v * meta["border_scale"], 2)
-                         for v in (top, right, bottom, left)]]
-                if meta["anchor"] != [0.5, 0.5]:
-                    layer["anch"] = meta["anchor"]
+                        [round(v * scale, 2) for v in (top, right, bottom, left)]]
+                if anchor != [0.5, 0.5]:
+                    layer["anch"] = [round(anchor[0], 4), round(anchor[1], 4)]
                 if record["flip"]:
                     layer["flip"] = record["flip"]
                 if record["mask"]:
@@ -725,8 +903,12 @@ def build(assets_root: Path, conn: sqlite3.Connection) -> dict[str, int]:
                     layer.pop("off")
             # A single keyframe is a pose, not motion. Clips where nothing actually
             # moves would show as a still image pretending to be an animation.
-            if not any(len(node.get(kind) or []) >= 2
-                       for node in node_pool for kind in ("pos", "rot", "scale")):
+            # A fade or a switch is a change too: a dialog appearing moves nothing.
+            moves = any(len(node.get(kind) or []) >= 2
+                        for node in node_pool for kind in ("pos", "rot", "scale"))
+            changes = any(len({key[1] for key in layer.get("alpha") or []}) >= 2
+                          or layer.get("acts") for layer in layers)
+            if not (moves or changes):
                 layers = []
             if layers:
                 stats["rigged"] += 1

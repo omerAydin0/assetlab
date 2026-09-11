@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import (AUDIO_EXT, VISUAL_EXT, connect, dhash, image_stats, infer_type,
-                   load_rgba, read_meta_guid, sha256_file)
+                   load_rgba, prune_dependents, read_meta_guid, sha256_file)
 
 
 def ogg_info(path: Path) -> dict[str, Any]:
@@ -166,6 +166,19 @@ def build_index(assets_root: Path, conn: sqlite3.Connection) -> tuple[int, int]:
              audio_codec=excluded.audio_codec, image_path=excluded.image_path""",
         rows,
     )
+    # The catalogue mirrors the export it was built from. A file gone from the export
+    # takes its row with it, and every row naming that asset goes too; left in place
+    # they were counted as art the build ships. A region a later stage cut from a
+    # file - `<descriptor>#<name>` - stays for as long as its file does.
+    gone = [(asset_id,) for asset_id, rel_path in conn.execute(
+                "SELECT id, rel_path FROM assets").fetchall()
+            if rel_path not in present and rel_path.split("#", 1)[0] not in present]
+    if gone:
+        conn.executemany("DELETE FROM assets WHERE id = ?", gone)
+        dependents = prune_dependents(conn)
+        print(f"  removed {len(gone)} assets no longer in the export"
+              + (", and " + ", ".join(f"{count} {name}" for name, count in dependents.items())
+                 if dependents else ""))
     conn.execute("INSERT OR REPLACE INTO meta VALUES ('assets_root', ?)", (str(assets_root),))
     conn.commit()
     return len(rows), images

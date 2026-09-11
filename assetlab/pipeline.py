@@ -119,6 +119,33 @@ def capabilities(staging: Diagnosis, export: Diagnosis | None) -> dict[str, str]
     }
 
 
+PACKAGE_SUFFIXES = (".apk", ".apkm", ".xapk", ".apks", ".zip")
+
+
+def fingerprint(input_path: Path, exe: Path | None) -> dict:
+    """SHA-256 of every package read and of the AssetRipper that read them.
+
+    A path and a size say which file was probably used; a hash says which one was.
+    """
+    from .core import sha256_file
+    from .ripper import find_exe
+    source = Path(input_path)
+    files = ([source] if source.is_file() else
+             sorted(p for p in source.rglob("*") if p.suffix.lower() in PACKAGE_SUFFIXES))
+    packages = {}
+    for path in files:
+        try:
+            packages[path.name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
+        except OSError:
+            packages[path.name] = None
+    ripper = find_exe(exe)
+    tool = None
+    if ripper and ripper.is_file():
+        tool = {"path": str(ripper), "bytes": ripper.stat().st_size,
+                "sha256": sha256_file(ripper)}
+    return {"packages": packages, "assetripper": tool}
+
+
 def run_pipeline(input_path: Path, out: Path, title: str,
                  staging: Path | None = None, export_dir: Path | None = None,
                  exe: Path | None = None, port: int = 5599,
@@ -252,6 +279,8 @@ def run_pipeline(input_path: Path, out: Path, title: str,
         "export": str(exported),
         "primary_content": str(primary) if primary else None,
         "il2cpp_metadata": bool((manifest.get("il2cpp") or {}).get("metadata")),
+        "primary_export": bool(primary_export),
+        "fingerprint": fingerprint(input_path, exe),
     }
     conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('provenance', ?)",
                  (json.dumps(provenance, ensure_ascii=False),))

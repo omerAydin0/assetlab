@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import (animations, browser, classify, dedup, graph, index, levels, models,
                prefabs, profile, skin, spine)
-from .core import connect
+from .core import connect, run_record
 
 STAGE_NAMES = ("profile", "index", "graph", "slice", "spine", "models", "skin", "levels",
                "animations", "prefabs", "classify", "dedup", "browser")
@@ -40,6 +40,11 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
     # later stage kept the export path its index stage once saw, and after the export
     # folders were renamed five catalogues pointed at directories that no longer existed.
     conn.execute("INSERT OR REPLACE INTO meta VALUES ('assets_root', ?)", (str(export),))
+    import json as _json
+    conn.execute("INSERT OR REPLACE INTO meta VALUES ('run', ?)", (_json.dumps(
+        {**run_record(), "export": str(export),
+         "primary_content": str(primary) if primary else None,
+         "skipped": sorted(skip)}, ensure_ascii=False),))
     conn.commit()
     detected: dict = {}
     results: dict = {}

@@ -565,6 +565,26 @@ def feature_from_project_dir(rel_path: str) -> tuple[str | None, str | None]:
     return meaningful[-1], (meaningful[-2] if len(meaningful) > 1 else None)
 
 
+def bundle_records(primary_content: Path | None) -> list[tuple[str, str]]:
+    """(bundle name, project path) for every entry every bundle record names."""
+    if not primary_content:
+        return []
+    bundle_dir = primary_content / "AssetBundle"
+    if not bundle_dir.is_dir():
+        return []
+    records: list[tuple[str, str]] = []
+    # A record is named after its bundle, `<bundle name>.json`; `.bundle.json` was only
+    # ever one build's bundle naming, and matching it read nothing from any other.
+    for path in sorted(bundle_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        name = data.get("m_AssetBundleName") or path.stem
+        records.extend((name, project_path) for project_path in (data.get("m_Container") or {}))
+    return records
+
+
 def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
     """basename (lowercase) -> (bundle name, original project path).
 
@@ -572,22 +592,9 @@ def load_bundle_map(primary_content: Path | None) -> dict[str, tuple[str, str]]:
     label is the developer path recorded in ``m_Container``
     (``Assets/_Studio/LiveOps/SummerEvent/Assets/SummerEventAtlas.spriteatlas``).
     """
-    if not primary_content:
-        return {}
-    bundle_dir = primary_content / "AssetBundle"
-    if not bundle_dir.is_dir():
-        return {}
     mapping: dict[str, tuple[str, str]] = {}
-    # A record is named after its bundle, `<bundle name>.json`; `.bundle.json` was only
-    # ever one build's bundle naming, and matching it read nothing from any other.
-    for path in bundle_dir.glob("*.json"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        name = data.get("m_AssetBundleName") or path.stem
-        for project_path in (data.get("m_Container") or {}):
-            mapping[Path(project_path).stem.lower()] = (name, project_path)
+    for name, project_path in bundle_records(primary_content):
+        mapping[Path(project_path).stem.lower()] = (name, project_path)
     return mapping
 
 
@@ -809,6 +816,12 @@ def mark_origin(conn: sqlite3.Connection) -> dict[str, int]:
 def classify(assets_root: Path, primary_content: Path | None,
              conn: sqlite3.Connection, rules_path: Path | None = None) -> dict[str, int]:
     bundle_map = load_bundle_map(primary_content)
+    # The records themselves, queryable, and rebuilt with the tags they justify: which
+    # bundle ships which project path. Tags alone said an asset came from a bundle
+    # without the record to check it against.
+    conn.execute("DELETE FROM bundles")
+    conn.executemany("INSERT OR IGNORE INTO bundles (bundle_name, project_path) VALUES (?, ?)",
+                     bundle_records(primary_content))
     rules = load_rules(rules_path)
     families = obstacle_families(conn)
     enums = scan_design_enums(assets_root)
