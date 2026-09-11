@@ -34,7 +34,12 @@ function objHero(o){
   return o.p.map(i => DATA[i]).filter(Boolean)
     .sort((a, b) => (b.w||0)*(b.h||0) - (a.w||0)*(a.h||0))[0] || null;
 }
-function objVisible(o){ return objMembers(o).some(match); }
+function objVisible(o){
+  // A prefab is found by its own name: none of its sprites need carry it.
+  const text = ((document.getElementById("q") || {}).value || "").trim().toLowerCase();
+  if (text && o.n.toLowerCase().includes(text)) return true;
+  return objMembers(o).some(match);
+}
 // The hub shows several builds at once and a per-build page shows one, so the badge
 // exists on the one page and not the other. Two builds ship a `coin`; without this
 // their cards are indistinguishable on the page where that matters.

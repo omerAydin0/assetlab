@@ -336,8 +336,10 @@ function render(reset){
       // Most objects are one sprite that owns nothing, which the assets tab already
       // shows. What this tab is for is the ones that come apart, so they lead - and
       // ranking across builds rather than within each keeps the comparison.
+      // Scenes - map pages, backdrops - follow the objects: ranked by part count
+      // alone, one build's first nine cards were map pages.
       filtered = OBJECTS.map((o, i) => [o, i]).filter(([o]) => objVisible(o))
-        .sort((a, b) => b[0].p.length - a[0].p.length ||
+        .sort((a, b) => (a[0].sc || 0) - (b[0].sc || 0) || b[0].p.length - a[0].p.length ||
               (b[0].c != null) - (a[0].c != null) || a[0].n.localeCompare(b[0].n));
     } else if (VIEW === "animations"){
       PAGED = "animation";

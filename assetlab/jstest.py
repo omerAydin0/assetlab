@@ -220,6 +220,10 @@ const poseObj = {n: "BeePrefab", w: null, p: [], c: null, a: null,
                  pose: "poses/7.png", cs: []};
 check("a prefab object's card shows the prefab assembled",
       objectCard([poseObj, 0]).includes('src="poses/7.png"'), true);
+const findBy = document.createElement("input");
+findBy.id = "q"; findBy.value = "beeprefab"; document.body.appendChild(findBy);
+check("a prefab object is found by its own name", objVisible(poseObj), true);
+findBy.remove();
 check("and its panel shows it as the final form",
       /final form[\s\S]*poses\/7\.png/.test(objectPanel(poseObj)), true);
 
