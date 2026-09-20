@@ -43,7 +43,9 @@ ELF_MAGIC = b"\x7fELF"
 ABI_PREFERENCE = ("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 ABI_RE = re.compile(r"(?:^|/)lib/([^/]+)/")
 # Matched against an already-lowercased path, so the pattern is lowercase too.
-DATA_DIR_RE = re.compile(r"(?:^|/)bin/data(?:/|$)")
+# An Android build keeps its player data in `assets/bin/Data`; a desktop build keeps
+# it in `<Game>_Data` beside the executable. Same payload, different address.
+DATA_DIR_RE = re.compile(r"(?:^|/)(?:bin/data|[^/]+_data)(?:/|$)")
 
 MAGIC_NAMES = [
     (BUNDLE_MAGICS, "UnityFS"),
@@ -54,6 +56,7 @@ MAGIC_NAMES = [
     ((b"\x1f\x8b",), "gzip"),
     ((b"OggS",), "ogg"),
     ((b"\x89PNG",), "png"),
+    ((b"MZ",), "PE"),
 ]
 
 
@@ -139,7 +142,7 @@ def classify(package: str, member: str, size: int, head: bytes) -> Member:
 
     in_data_dir = bool(DATA_DIR_RE.search(lowered))
     if in_data_dir:
-        evidence.append("path:bin/Data")
+        evidence.append("path:player-data")
 
     # Native libraries and IL2CPP metadata: AssetRipper needs both together to
     # resolve script types. We never decompile them.
@@ -149,6 +152,18 @@ def classify(package: str, member: str, size: int, head: bytes) -> Member:
         if magic == "ELF" or lowered.endswith(".so"):
             return Member(package, member, size, NATIVE_LIB, magic, abi,
                           evidence, "high" if magic == "ELF" else "medium", declared)
+
+    # A desktop build has no lib/<abi> directory: its IL2CPP code is one DLL beside
+    # the player data, and the engine runtime is another. Neither is ever decompiled;
+    # AssetRipper reads them to resolve script types.
+    if name == "gameassembly.dll":
+        evidence.append("name:GameAssembly.dll")
+        return Member(package, member, size, NATIVE_LIB, magic, abi, evidence, "high",
+                      declared)
+    if name == "unityplayer.dll":
+        evidence.append("name:UnityPlayer.dll")
+        return Member(package, member, size, UNITY_SUPPORT, magic, abi, evidence, "high",
+                      declared)
 
     if name == "global-metadata.dat" or magic == "il2cpp-metadata":
         evidence.append("name:global-metadata.dat" if name == "global-metadata.dat"

@@ -227,9 +227,13 @@ def diagnose_staging(staging: Path) -> Diagnosis:
     for path in root.rglob("*"):
         (directories if path.is_dir() else every).append(path)
 
-    data_dirs = [p for p in directories if p.name == "Data" and p.parent.name == "bin"]
+    # `assets/bin/Data` on Android, `<Game>_Data` on desktop. `il2cpp_data` sits
+    # inside the latter and is not a payload directory of its own.
+    data_dirs = [p for p in directories
+                 if (p.name == "Data" and p.parent.name == "bin")
+                 or (p.name.lower().endswith("_data") and p.name.lower() != "il2cpp_data")]
     if not data_dirs:
-        result.add(FAIL, "no assets/bin/Data directory",
+        result.add(FAIL, "no player data directory: neither assets/bin/Data nor <Game>_Data",
                    "AssetRipper needs the Unity player data. Check that the package "
                    "carrying it was included, not only the ABI splits.")
     for data_dir in data_dirs:

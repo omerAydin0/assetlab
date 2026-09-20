@@ -16,9 +16,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from .detect import (ASSET_BUNDLE, IL2CPP_METADATA, MANAGED, NATIVE_LIB, NESTED_ARCHIVE,
-                     RESOURCE_STREAM, UNITY_DATA, UNKNOWN_BINARY, classify,
-                     serialized_file_version, unity_version)
+from .detect import (ASSET_BUNDLE, IL2CPP_METADATA, MANAGED, NATIVE_LIB, 
+                     NESTED_ARCHIVE, RESOURCE_STREAM, UNITY_DATA, UNITY_SUPPORT, 
+                     UNKNOWN_BINARY, classify, serialized_file_version, unity_version)
 from .stage import ingest
 
 PASSED: list[str] = []
@@ -280,6 +280,18 @@ def unit_checks() -> None:
     check("split part -> unity data",
           classify("p", "assets/bin/Data/sharedassets0.assets.split3", 10, JUNK).role,
           UNITY_DATA)
+    # A desktop build: player data in <Game>_Data, code in DLLs beside it.
+    check("a desktop build's player data is player data",
+          classify("p", "PEAK_Data/level0", 10, SERIALIZED_V17).role, UNITY_DATA)
+    check("its managed assemblies are managed",
+          classify("p", "PEAK_Data/Managed/Assembly-CSharp.dll", 10, DLL).role, MANAGED)
+    check("GameAssembly.dll is the native library",
+          classify("p", "GameAssembly.dll", 10, DLL).role, NATIVE_LIB)
+    check("the engine runtime is support, not content",
+          classify("p", "UnityPlayer.dll", 10, DLL).role, UNITY_SUPPORT)
+    check("a stream beside the player data is a resource stream",
+          classify("p", "PEAK_Data/sharedassets0.assets.resS", 10, JUNK).role,
+          RESOURCE_STREAM)
     check("nested zip flagged, not called a bundle",
           classify("p", "assets/MapBundles/map_1_2.zip", 10, ZIP).role, NESTED_ARCHIVE)
     check("version out of range is not a serialized file",

@@ -423,6 +423,26 @@ def absent_tree_checks() -> None:
               any("assetlab.ingest" in (c.remedy or "") for c in report.checks), True)
 
 
+def desktop_staging_checks() -> None:
+    """A desktop build keeps its player data in <Game>_Data; the gate must know it."""
+    with tempfile.TemporaryDirectory() as temporary:
+        staging = Path(temporary) / "PEAK"
+        (staging / "PEAK_Data" / "Managed").mkdir(parents=True)
+        # A SerializedFile states its version in bytes 8-12; the gate reads the head
+        # rather than trusting the name, so the fixture has to carry a real one.
+        # Over the 64-byte floor the gate uses to ignore stubs.
+        serialized = bytes(8) + (22).to_bytes(4, "big") + bytes(256)
+        (staging / "PEAK_Data" / "level0").write_bytes(serialized)
+        (staging / "PEAK_Data" / "sharedassets0.assets").write_bytes(serialized)
+        (staging / "PEAK_Data" / "Managed" / "Assembly-CSharp.dll").write_bytes(b"MZ")
+        (staging / "GameAssembly.dll").write_bytes(b"MZ")
+        report = diagnose_staging(staging)
+    check("a desktop build's player data is found, not refused",
+          [c.message for c in report.blockers], [])
+    check("and the directory it found is named",
+          any("PEAK_Data" in c.message for c in report.checks), True)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -1899,6 +1919,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     mesh_checks()
     gate_checks()
     absent_tree_checks()
+    desktop_staging_checks()
     corpus_checks()
     scriptable_corpus_checks()
     object_checks()
