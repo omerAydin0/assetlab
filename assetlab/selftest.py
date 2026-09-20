@@ -19,15 +19,17 @@ from .animations import (parse_clip, parse_prefab_rig, parse_transform_curves,
 from .classify import (bundle_reach, feature_from_project_dir,
                        feature_from_container_path, match_vocabulary,
                        mechanics_from_holders)
-from .core import connect, infer_type, make_thumbnail
+from .core import (SCAN_BLOCK, connect, infer_type, make_thumbnail, scan_guids,
+                   stream_documents)
 from .index import build_index
 from .mesh import parse_mesh
 from .objects import group_objects, name_tokens
 from .spine import build as spine_build
 from .spine import cut, fit_to_page, footprint, on_page, parse_atlas
-from .models import parse_material, parse_prefab_models
+from .models import (parse_material, parse_prefab_models, parse_scene_objects,
+                     _collect, _place)
 from .profile import FLAT_SHADER_RE, LIT_SHADER_RE, _curve
-from .doctor import (diagnose_export, diagnose_levels, diagnose_outcome,
+from .doctor import (WARN, diagnose_export, diagnose_levels, diagnose_outcome,
                      diagnose_staging)
 from .levels import corpus_candidates, looks_like_tiled, parse_level
 from .ripper import Ripper
@@ -441,6 +443,233 @@ def desktop_staging_checks() -> None:
           [c.message for c in report.blockers], [])
     check("and the directory it found is named",
           any("PEAK_Data" in c.message for c in report.checks), True)
+    # A Mono build has no IL2CPP metadata and does not need any: the types are in
+    # the assemblies. Warning about the missing file reported a healthy build as
+    # crippled.
+    check("a Mono build is not warned about missing IL2CPP metadata",
+          [c.message for c in report.checks
+           if c.status == WARN and "metadata" in c.message], [])
+    check("its assemblies are what resolves the script types",
+          any("managed assemblies staged" in c.message for c in report.checks), True)
+
+
+#: Two copies of the same two-mesh prop, one of them renamed the way Unity renames a
+#: duplicate, plus a third prop that shares neither mesh. Written as a scene, so the
+#: only thing marking the boundaries is the hierarchy itself.
+TWO_PROPS_SCENE = """%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &100
+GameObject:
+  m_Name: Level
+--- !u!4 &101
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 201}
+  - {fileID: 301}
+  - {fileID: 401}
+  m_Father: {fileID: 0}
+--- !u!1 &200
+GameObject:
+  m_Name: Bench
+--- !u!4 &201
+Transform:
+  m_GameObject: {fileID: 200}
+  m_LocalPosition: {x: 3, y: 0, z: 0}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 211}
+  m_Father: {fileID: 101}
+--- !u!33 &202
+MeshFilter:
+  m_GameObject: {fileID: 200}
+  m_Mesh: {fileID: 4300000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+--- !u!23 &203
+MeshRenderer:
+  m_GameObject: {fileID: 200}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!1 &210
+GameObject:
+  m_Name: Plank
+--- !u!4 &211
+Transform:
+  m_GameObject: {fileID: 210}
+  m_LocalPosition: {x: 0, y: 1, z: 0}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 201}
+--- !u!33 &212
+MeshFilter:
+  m_GameObject: {fileID: 210}
+  m_Mesh: {fileID: 4300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+--- !u!23 &213
+MeshRenderer:
+  m_GameObject: {fileID: 210}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!1 &300
+GameObject:
+  m_Name: Bench (1)
+--- !u!4 &301
+Transform:
+  m_GameObject: {fileID: 300}
+  m_LocalPosition: {x: 41.117, y: 0, z: 9.004}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 311}
+  m_Father: {fileID: 101}
+--- !u!33 &302
+MeshFilter:
+  m_GameObject: {fileID: 300}
+  m_Mesh: {fileID: 4300000, guid: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, type: 3}
+--- !u!23 &303
+MeshRenderer:
+  m_GameObject: {fileID: 300}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!1 &310
+GameObject:
+  m_Name: Plank (1)
+--- !u!4 &311
+Transform:
+  m_GameObject: {fileID: 310}
+  m_LocalPosition: {x: 0, y: 1.003, z: 0}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 301}
+--- !u!33 &312
+MeshFilter:
+  m_GameObject: {fileID: 310}
+  m_Mesh: {fileID: 4300000, guid: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, type: 3}
+--- !u!23 &313
+MeshRenderer:
+  m_GameObject: {fileID: 310}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+--- !u!1 &400
+GameObject:
+  m_Name: Lamp
+--- !u!4 &401
+Transform:
+  m_GameObject: {fileID: 400}
+  m_LocalPosition: {x: -8, y: 0, z: 2}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 101}
+--- !u!33 &402
+MeshFilter:
+  m_GameObject: {fileID: 400}
+  m_Mesh: {fileID: 4300000, guid: dddddddddddddddddddddddddddddddd, type: 3}
+--- !u!23 &403
+MeshRenderer:
+  m_GameObject: {fileID: 400}
+  m_Materials:
+  - {fileID: 2100000, guid: cccccccccccccccccccccccccccccccc, type: 2}
+"""
+
+
+def scene_object_checks() -> None:
+    """A scene has no file boundary, so the reader has to find the objects in it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        scene = Path(tmp) / "Level.unity"
+        scene.write_text(TWO_PROPS_SCENE, encoding="utf-8")
+        objects = parse_scene_objects(scene)
+
+    check("a scene yields objects, not one blob", len(objects), 2)
+    by_name = {o["name"]: o for o in objects}
+    check("the repeated prop is reported once", sorted(by_name), ["Bench", "Lamp"])
+    check("and says how often the scene places it",
+          by_name["Bench"]["placements"], 2)
+    check("the prop that stands alone is placed once",
+          by_name["Lamp"]["placements"], 1)
+    # The two benches sit 41 units apart and their planks differ by 3 mm. Keying on
+    # placement instead of shape would call them two different objects.
+    check("the cut carries the whole prop, not just its root",
+          by_name["Bench"]["parts"], 2)
+    check("its meshes come with it",
+          sorted(m["mesh_guid"][:4] for m in by_name["Bench"]["models"]),
+          ["aaaa", "bbbb"])
+    check("the original stands for the group, not Unity's renamed duplicate",
+          by_name["Bench"]["path"], "Bench")
+
+
+def deep_hierarchy_checks() -> None:
+    """A generated level nests far past the interpreter's stack."""
+    depth = 6000
+    docs = []
+    for index in range(depth):
+        file_id = 1000 + index * 10
+        child = "" if index == depth - 1 else f"\n  - {{fileID: {file_id + 10}}}"
+        docs.append(f"""--- !u!1 &{file_id + 1}
+GameObject:
+  m_Name: N{index}
+--- !u!4 &{file_id}
+Transform:
+  m_GameObject: {{fileID: {file_id + 1}}}
+  m_LocalPosition: {{x: 0, y: 1, z: 0}}
+  m_LocalRotation: {{x: 0, y: 0, z: 0, w: 1}}
+  m_LocalScale: {{x: 1, y: 1, z: 1}}
+  m_Children:{child if child else " []"}
+  m_Father: {{fileID: {0 if index == 0 else file_id - 10}}}""")
+    text = "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n" + "\n".join(docs) + "\n"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        scene = Path(tmp) / "Deep.unity"
+        scene.write_text(text, encoding="utf-8")
+        gathered = _collect(stream_documents(scene))
+        placed = _place(gathered[0], gathered[1])
+    check("a hierarchy deeper than the stack is still walked",
+          len(placed[0]), depth)
+    # Every link in the chain lifts its child by one, the root included.
+    check("and the leaf ends up where the chain put it",
+          round(float(placed[1][str(1000 + (depth - 1) * 10 + 1)][1, 3])), depth)
+
+
+def stream_checks() -> None:
+    """Reading a file too large to hold must give the same answer as holding it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "Level.unity"
+        path.write_text(TWO_PROPS_SCENE, encoding="utf-8")
+        streamed = [(c, f) for c, f, _ in stream_documents(path)]
+    check("every document is seen, in order",
+          streamed[:3], [(1, "100"), (4, "101"), (1, "200")])
+    check("and the last one is not dropped", streamed[-1], (23, "403"))
+
+    # A guid laid across the block boundary is the case a chunked read gets wrong:
+    # read naively it is missed, read with a careless overlap it is counted twice.
+    guid = "e" * 32
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "big.unity"
+        prefix = b"#" * (SCAN_BLOCK - 10)
+        path.write_bytes(prefix + f"guid: {guid}\n".encode() + b"#" * 4096)
+        found = list(scan_guids(path))
+    check("a guid split across the read boundary is found", found, [guid])
+
+
+def export_reuse_checks() -> None:
+    """A half-written export must not be mistaken for a finished one."""
+    from .pipeline import EXPORT_DONE, export_is_reusable
+    with tempfile.TemporaryDirectory() as tmp:
+        export = Path(tmp) / "Game"
+        check("nothing exported yet, so nothing to reuse",
+              export_is_reusable(export), False)
+        assets = export / "ExportedProject" / "Assets"
+        assets.mkdir(parents=True)
+        (assets / "Texture2D").mkdir()
+        check("a tree that stopped part way is not reusable",
+              export_is_reusable(export), False)
+        (export / EXPORT_DONE).write_text("2026-09-20", encoding="utf-8")
+        check("an export that finished is reusable",
+              export_is_reusable(export), True)
 
 
 def corpus_checks() -> None:
@@ -1920,6 +2149,10 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     gate_checks()
     absent_tree_checks()
     desktop_staging_checks()
+    scene_object_checks()
+    export_reuse_checks()
+    deep_hierarchy_checks()
+    stream_checks()
     corpus_checks()
     scriptable_corpus_checks()
     object_checks()

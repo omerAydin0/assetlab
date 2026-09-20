@@ -230,12 +230,16 @@ CREATE INDEX IF NOT EXISTS idx_models_mesh ON models(mesh_guid);
 -- A prefab drawn whole: every mesh it owns, each in its own place. A chair on its
 -- own is a shape; a chair under a table with a penguin on it is the game.
 CREATE TABLE IF NOT EXISTS scenes (
-    prefab_id   INTEGER PRIMARY KEY,
+    id          INTEGER PRIMARY KEY,
+    prefab_id   INTEGER,     -- the prefab, or the scene file, the object came from
     prefab_name TEXT,
+    object_name TEXT,        -- null for a prefab: the file already names it
+    placements  INTEGER,     -- how many times a scene places this same shape
     render_path TEXT,
     part_count  INTEGER,
     tri_count   INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_scenes_prefab ON scenes(prefab_id);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
 """
@@ -251,9 +255,17 @@ def connect(db_path: Path) -> sqlite3.Connection:
     if "object_layers" not in level_columns:
         conn.execute("ALTER TABLE levels ADD COLUMN object_layers TEXT")
 
+    # `scenes` is purely derived, and its key changed when a scene - which holds
+    # many objects rather than being one - became a source.
+    scene_columns = {row[1] for row in conn.execute("PRAGMA table_info(scenes)")}
+    if scene_columns and "object_name" not in scene_columns:
+        conn.execute("DROP TABLE scenes")
+        conn.executescript(SCHEMA)
+
     model_columns = {row[1] for row in conn.execute("PRAGMA table_info(models)")}
     for column, decl in (("matrix", "TEXT"), ("render_path", "TEXT"),
-                         ("tri_count", "INTEGER"), ("vert_count", "INTEGER")):
+                         ("tri_count", "INTEGER"), ("vert_count", "INTEGER"),
+                         ("placements", "INTEGER")):
         if column not in model_columns:
             conn.execute(f"ALTER TABLE models ADD COLUMN {column} {decl}")
 
@@ -290,6 +302,86 @@ def connect(db_path: Path) -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE sprites ADD COLUMN {column} {decl}")
     conn.commit()
     return conn
+
+
+#: How much of a large file is held at once while scanning it. The overlap has to
+#: exceed the longest pattern read across the boundary; a guid reference is 38 bytes.
+SCAN_BLOCK = 1 << 22
+SCAN_OVERLAP = 64
+
+#: A file this size or larger is streamed rather than read whole. A prefab never
+#: reaches it; a generated scene is a thousand times over.
+STREAM_ABOVE = 1 << 24
+
+
+def scan_matches(path: Path, pattern: re.Pattern[bytes]):
+    """First group of every match in a file, without holding the file.
+
+    A hand-authored scene is a few megabytes. A scene a build assembles from a
+    prop library is several hundred, and `read_bytes` on twenty of them asks for
+    more memory than the machine has. Blocks overlap so a match that straddles a
+    boundary is still read exactly once: a match is kept only when it begins at
+    or after the point the previous block stopped reporting from.
+    """
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return
+    with handle:
+        tail = b""
+        while True:
+            block = handle.read(SCAN_BLOCK)
+            if not block:
+                break
+            window = tail + block
+            floor = max(0, len(tail) - SCAN_OVERLAP)
+            for match in pattern.finditer(window):
+                if match.start() >= floor:
+                    yield match.group(1).decode("ascii")
+            tail = window[-SCAN_OVERLAP:]
+
+
+def scan_guids(path: Path):
+    """Every guid in a file, streamed."""
+    return scan_matches(path, GUID_RE)
+
+
+def scan_class_ids(path: Path):
+    """Every Unity class id declared by a document header, streamed."""
+    return scan_matches(path, CLASS_ID_HEAD_RE)
+
+
+CLASS_ID_HEAD_RE = re.compile(rb"--- !u!(\d+) &")
+
+
+def stream_documents(path: Path):
+    """Yield ``(class_id, file_id, body)`` for each document in a Unity YAML file.
+
+    Every stage that reads a prefab splits the whole text on the document header.
+    That is the right thing for a file measured in kilobytes and the wrong thing
+    for one measured in hundreds of megabytes, where the split alone costs several
+    gigabytes. Line-at-a-time the cost is one document.
+    """
+    class_id: int | None = None
+    file_id = ""
+    body: list[str] = []
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if line.startswith("--- !u!"):
+                if class_id is not None:
+                    yield class_id, file_id, "".join(body)
+                found = DOC_HEAD_RE.match(line)
+                if found:
+                    class_id, file_id, body = int(found.group(1)), found.group(2), []
+                else:                       # a header we cannot read ends the run
+                    class_id, file_id, body = None, "", []
+            elif class_id is not None:
+                body.append(line)
+    if class_id is not None:
+        yield class_id, file_id, "".join(body)
+
+
+DOC_HEAD_RE = re.compile(r"^--- !u!(\d+) &(-?\d+)")
 
 
 # A YAML asset declares its own Unity class id, which beats any folder guess.

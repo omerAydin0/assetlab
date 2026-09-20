@@ -29,7 +29,7 @@ from PIL import Image
 import sqlite3
 from pathlib import Path
 
-from .core import connect
+from .core import connect, stream_documents
 from .mesh import Piece, parse_mesh, render
 
 DOC_RE = re.compile(r"^--- !u!(\d+) &(-?\d+)", re.M)
@@ -134,12 +134,13 @@ def parse_material(text: str, linear: bool = False) -> dict:
     return {"textures": textures, "colour": colour}
 
 
-def parse_prefab_models(text: str) -> list[dict]:
-    """Every mesh a prefab draws, with the materials bound to it."""
-    parts = DOC_RE.split(text)
-    docs = [(int(parts[i]), parts[i + 1], parts[i + 2])
-            for i in range(1, len(parts) - 2, 3)]
+def _collect(documents) -> tuple:
+    """Read a stream of YAML documents into the hierarchy they describe.
 
+    Taken whole, this is what both a prefab and a scene are: named GameObjects,
+    Transforms that place them, and renderers that say what to draw. The only
+    difference is size, which is why the documents arrive as an iterator.
+    """
     names: dict[str, str] = {}
     transforms: dict[str, dict] = {}
     meshes: dict[str, str] = {}          # gameObject -> mesh guid
@@ -147,7 +148,7 @@ def parse_prefab_models(text: str) -> list[dict]:
     skinned: set[str] = set()
     root_bones: dict[str, str] = {}      # gameObject of the renderer -> bone fileID
 
-    for class_id, _file_id, body in docs:
+    for class_id, _file_id, body in documents:
         if class_id == GAME_OBJECT:
             found = NAME_RE.search(body)
             if found:
@@ -188,30 +189,59 @@ def parse_prefab_models(text: str) -> list[dict]:
                 materials.setdefault(owner.group(1), []).extend(
                     GUID_RE.findall(block.group(1)))
 
-    # Object paths, so a model can be found again in the prefab it came from.
+    return names, transforms, meshes, materials, skinned, root_bones
+
+
+def _place(names: dict, transforms: dict) -> tuple:
+    """Walk the hierarchy from its roots, recording each node's world matrix.
+
+    Iterative throughout. The recursive version this replaces was fine on prefabs
+    and took the interpreter down with it on a scene: a build that assembles a
+    level from a prop library nests two hundred thousand transforms, far past the
+    stack.
+    """
     child_ids = {c for r in transforms.values() for c in r["children"]}
+    roots = [f for f in transforms if f not in child_ids]
     paths: dict[str, str] = {}
     world: dict[str, np.ndarray] = {}
     world_by_transform: dict[str, np.ndarray] = {}
-
-    def walk(file_id: str, segments: list[str], parent: np.ndarray,
-             seen: frozenset) -> None:
-        record = transforms[file_id]
-        here = parent @ record["local"]
-        paths[record["go"]] = "/".join(segments)
-        world[record["go"]] = here
-        world_by_transform[file_id] = here
-        for child in record["children"]:
-            if child in transforms and child not in seen:
-                walk(child, segments + [names.get(transforms[child]["go"], "")],
-                     here, seen | {child})
+    kids: dict[str, list[str]] = {}
 
     identity = np.eye(4, dtype=np.float32)
-    for root in (f for f in transforms if f not in child_ids):
-        walk(root, [], identity, frozenset({root}))
+    seen: set[str] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        stack = [(root, [], identity)]
+        seen.add(root)
+        while stack:
+            file_id, segments, parent = stack.pop()
+            record = transforms[file_id]
+            here = parent @ record["local"]
+            paths[record["go"]] = "/".join(segments)
+            world[record["go"]] = here
+            world_by_transform[file_id] = here
+            children = [c for c in record["children"]
+                        if c in transforms and c not in seen]
+            kids[file_id] = children
+            for child in children:
+                seen.add(child)
+                stack.append(
+                    (child, segments + [names.get(transforms[child]["go"], "")], here))
+    return paths, world, world_by_transform, kids, roots
 
+
+def _models(gathered: tuple, placed: tuple, only: set | None = None) -> list[dict]:
+    """The drawn nodes of a hierarchy, or of one subtree of it."""
+    names, transforms, meshes, materials, skinned, root_bones = gathered
+    paths, world, world_by_transform, _kids, _roots = placed
     found = []
-    for gameobject, mesh_guid in meshes.items():
+    # Iterating the subtree, not the whole hierarchy: a scene holds tens of
+    # thousands of meshes and is cut into thousands of objects, so filtering the
+    # full set per object is the difference between seconds and an afternoon.
+    wanted = meshes.items() if only is None else (
+        (go, meshes[go]) for go in only if go in meshes)
+    for gameobject, mesh_guid in wanted:
         found.append({
             "path": paths.get(gameobject, ""),
             "name": names.get(gameobject, ""),
@@ -224,6 +254,121 @@ def parse_prefab_models(text: str) -> list[dict]:
             "bone_placed": gameobject in root_bones,
         })
     return found
+
+
+def parse_prefab_models(text: str) -> list[dict]:
+    """Every mesh a prefab draws, with the materials bound to it."""
+    parts = DOC_RE.split(text)
+    documents = [(int(parts[i]), parts[i + 1], parts[i + 2])
+                 for i in range(1, len(parts) - 2, 3)]
+    gathered = _collect(documents)
+    return _models(gathered, _place(gathered[0], gathered[1]))
+
+
+#: A subtree drawing at most this many meshes may stand as one object even when
+#: nothing else in the scene looks like it. The repetition rule below does the real
+#: work; this only stops a one-off corner of a scene from being reported whole.
+SCENE_SEGMENT_CAP = 16
+
+
+def parse_scene_objects(path: Path, cap: int = SCENE_SEGMENT_CAP) -> list[dict]:
+    """Objects recovered from a scene, one entry per distinct thing it draws.
+
+    A prefab is one file, so the file is the object. A scene holds every object at
+    once and the authored boundaries are gone: the build inlines each placed prefab
+    into the scene's own hierarchy. What survives is repetition. A prefab exists
+    because it is used more than once, so the subtree shape that occurs again is
+    the prefab, and the node where that shape starts is the boundary.
+
+    The shape of a subtree is what it draws - the meshes and the materials bound to
+    them - and deliberately not where it sits. Placement was in the key at first and
+    the match rate collapsed to nothing: a build that scatters props jitters every
+    instance, so two copies of a rock never agree on position.
+
+    A size cap is kept for the remainder. Where nothing repeats - a scene's one-off
+    corner, a small hand-built level - it stops the whole branch being reported as a
+    single object.
+    """
+    gathered = _collect(stream_documents(path))
+    names, transforms, meshes = gathered[0], gathered[1], gathered[2]
+    materials = gathered[3]
+    placed = _place(names, transforms)
+    node_paths, _world, _world_by_transform, kids, roots = placed
+
+    # Depth-first order, so a node can be settled after everything beneath it.
+    order: list[str] = []
+    stack = list(roots)
+    while stack:
+        file_id = stack.pop()
+        order.append(file_id)
+        stack.extend(kids.get(file_id, ()))
+
+    # Bottom-up in one pass each: how much a subtree draws, and a hash standing for
+    # what it draws. The hash folds in the children's, so equal hashes mean equal
+    # subtrees - the same trick a content-addressed tree uses, and the reason this
+    # costs one pass rather than one comparison per pair.
+    drawn: dict[str, int] = {}
+    shape: dict[str, int] = {}
+    for file_id in reversed(order):
+        gameobject = transforms[file_id]["go"]
+        total = 1 if gameobject in meshes else 0
+        for kid in kids.get(file_id, ()):
+            total += drawn[kid]
+        drawn[file_id] = total
+        shape[file_id] = hash((
+            meshes.get(gameobject), tuple(materials.get(gameobject, ())),
+            tuple(sorted(shape[kid] for kid in kids.get(file_id, ())))))
+
+    seen_shape: dict[int, int] = {}
+    for file_id in order:
+        if drawn[file_id]:
+            seen_shape[shape[file_id]] = seen_shape.get(shape[file_id], 0) + 1
+
+    # Does anything below this node repeat? If so the boundary is further down.
+    below: dict[str, bool] = {}
+    for file_id in reversed(order):
+        below[file_id] = any(
+            below[kid] or (drawn[kid] and seen_shape.get(shape[kid], 0) > 1)
+            for kid in kids.get(file_id, ()))
+
+    cuts: list[str] = []
+    stack = list(roots)
+    while stack:
+        file_id = stack.pop()
+        if not drawn[file_id]:
+            continue                       # draws nothing: a marker, a spawn point
+        repeated = seen_shape.get(shape[file_id], 0) > 1
+        if repeated or (drawn[file_id] <= cap and not below[file_id]):
+            cuts.append(file_id)
+        else:
+            stack.extend(kids.get(file_id, ()))
+
+    groups: dict[int, list[str]] = {}
+    for file_id in cuts:
+        groups.setdefault(shape[file_id], []).append(file_id)
+
+    objects = []
+    for key, members in groups.items():
+        # Unity names a duplicate `Bench (1)`; the shortest name in the group is the
+        # one that was not renamed, so that member speaks for the rest.
+        first = min(members, key=lambda f: (len(names.get(transforms[f]["go"], "")),
+                                            names.get(transforms[f]["go"], "")))
+        subtree, inner = set(), [first]
+        while inner:
+            node = inner.pop()
+            subtree.add(transforms[node]["go"])
+            inner.extend(kids.get(node, ()))
+        label = names.get(transforms[first]["go"], "")
+        models = _models(gathered, placed, only=subtree)
+        objects.append({
+            "name": label or "(unnamed)",
+            "path": node_paths.get(transforms[first]["go"], ""),
+            "placements": len(members),
+            "models": models,
+            "parts": len(models),
+        })
+    objects.sort(key=lambda entry: (-entry["placements"], entry["name"]))
+    return objects
 
 
 #: Sampling a 2048-square atlas per pixel is wasted work at thumbnail size, and a
@@ -317,8 +462,16 @@ class Renderer:
 SCENE_SIZE = 640
 
 
+#: How much scene YAML one run will read. Sized from measurement, not taste: a
+#: generated level is around half a gigabyte and twenty of them repeat the same prop
+#: library, so the first few buy nearly every distinct object and the rest buy
+#: minutes. Raise it to read a build exhaustively.
+SCENE_READ_BUDGET = 2 << 30
+
+
 def build(assets_root: Path, conn: sqlite3.Connection,
-          out_dir: Path | None = None) -> dict[str, int]:
+          out_dir: Path | None = None,
+          scene_budget: int = SCENE_READ_BUDGET) -> dict[str, int]:
     by_guid = {row["guid"]: dict(row) for row in conn.execute(
         "SELECT guid, id, name, rel_path, image_path, size_bytes FROM assets "
         "WHERE guid IS NOT NULL")}
@@ -354,6 +507,21 @@ def build(assets_root: Path, conn: sqlite3.Connection,
 
     prefabs = conn.execute(
         "SELECT id, name, rel_path FROM assets WHERE unity_type = 'Prefab'").fetchall()
+    # Smallest first. A build that generates its levels writes half a gigabyte of
+    # YAML per level and ships twenty of them; reading every one costs more than the
+    # rest of the pipeline together and adds almost nothing, because the levels are
+    # assembled from the same prop library. The budget is spent where it buys the
+    # most distinct objects, and what it could not reach is reported rather than
+    # quietly dropped.
+    scene_rows = conn.execute(
+        "SELECT id, name, rel_path FROM assets WHERE unity_type = 'Scene'").fetchall()
+    scene_files = []
+    for row in scene_rows:
+        try:
+            scene_files.append((( assets_root / row["rel_path"]).stat().st_size, row))
+        except OSError:
+            continue
+    scene_files.sort(key=lambda pair: pair[0])
 
     renderer = Renderer(assets_root, out_dir) if out_dir else None
     # One picture per distinct mesh, not per placement: the same chair leg appears
@@ -362,16 +530,40 @@ def build(assets_root: Path, conn: sqlite3.Connection,
 
     rows, scenes = [], []
     stats = {"prefabs": len(prefabs), "models": 0, "skinned": 0,
-             "textured": 0, "flat_colour": 0, "rendered": 0, "scenes": 0}
-    for prefab in prefabs:
-        try:
-            text = (assets_root / prefab["rel_path"]).read_text(encoding="utf-8",
-                                                                errors="ignore")
-        except OSError:
-            continue
+             "textured": 0, "flat_colour": 0, "rendered": 0, "scenes": 0,
+             "scene_files": 0, "scene_files_skipped": 0, "scene_objects": 0,
+             "scene_placements": 0}
+    def sources():
+        """Every object to draw: one per prefab file, then one per scene object."""
+        for prefab in prefabs:
+            try:
+                text = (assets_root / prefab["rel_path"]).read_text(
+                    encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            yield prefab["id"], prefab["name"], None, 1, parse_prefab_models(text)
 
+        budget = scene_budget
+        for size, row in scene_files:
+            if size > budget:
+                stats["scene_files_skipped"] += 1
+                continue
+            budget -= size
+            try:
+                objects = parse_scene_objects(assets_root / row["rel_path"])
+            except (OSError, MemoryError):
+                stats["scene_files_skipped"] += 1
+                continue
+            stats["scene_files"] += 1
+            for entry in objects:
+                stats["scene_objects"] += 1
+                stats["scene_placements"] += entry["placements"]
+                yield (row["id"], row["name"], entry["name"], entry["placements"],
+                       entry["models"])
+
+    for holder_id, holder_name, object_label, placements, parsed in sources():
         scene_pieces, scene_triangles = [], 0
-        for model in parse_prefab_models(text):
+        for model in parsed:
             mesh = by_guid.get(model["mesh_guid"])
             details = [d for d in (material_detail(g) for g in model["material_guids"])
                        if d]
@@ -405,10 +597,11 @@ def build(assets_root: Path, conn: sqlite3.Connection,
                         scene_triangles += triangles
 
             rows.append({
-                "prefab_id": prefab["id"],
-                "prefab_name": prefab["name"],
+                "prefab_id": holder_id,
+                "prefab_name": holder_name,
+                "placements": placements,
                 "path": model["path"],
-                "object_name": model["name"],
+                "object_name": object_label or model["name"],
                 "mesh_guid": model["mesh_guid"],
                 "mesh_name": mesh["name"] if mesh else None,
                 "mesh_bytes": mesh["size_bytes"] if mesh else None,
@@ -422,16 +615,20 @@ def build(assets_root: Path, conn: sqlite3.Connection,
                 "vert_count": vertices,
             })
 
-        # A single-mesh prefab is already covered by that mesh's own picture.
+        # A single-mesh object is already covered by that mesh's own picture.
         if renderer and len(scene_pieces) > 1 and scene_triangles <= SCENE_TRIANGLE_CAP:
             # An assembled prefab is the picture a reader actually studies - it
             # carries the whole object rather than one of its parts - so it gets
             # the larger canvas. Single meshes stay small: there are thousands of
             # them, and at 320 they already read as what they are.
-            path = renderer.draw(scene_pieces, f"s{prefab['id']}", size=SCENE_SIZE)
+            key = f"s{holder_id}" if object_label is None \
+                else f"s{holder_id}_{len(scenes)}"
+            path = renderer.draw(scene_pieces, key, size=SCENE_SIZE)
             if path:
-                scenes.append({"prefab_id": prefab["id"],
-                               "prefab_name": prefab["name"], "render_path": path,
+                scenes.append({"prefab_id": holder_id,
+                               "prefab_name": holder_name,
+                               "object_name": object_label,
+                               "placements": placements, "render_path": path,
                                "part_count": len(scene_pieces),
                                "tri_count": scene_triangles})
                 stats["scenes"] += 1
@@ -440,16 +637,16 @@ def build(assets_root: Path, conn: sqlite3.Connection,
     conn.executemany(
         """INSERT INTO models (prefab_id, prefab_name, path, object_name, mesh_guid,
                                mesh_name, mesh_bytes, skinned, materials, matrix,
-                               render_path, tri_count, vert_count)
+                               render_path, tri_count, vert_count, placements)
            VALUES (:prefab_id, :prefab_name, :path, :object_name, :mesh_guid,
                    :mesh_name, :mesh_bytes, :skinned, :materials, :matrix,
-                   :render_path, :tri_count, :vert_count)""", rows)
+                   :render_path, :tri_count, :vert_count, :placements)""", rows)
     conn.execute("DELETE FROM scenes")
     conn.executemany(
-        """INSERT INTO scenes (prefab_id, prefab_name, render_path, part_count,
-                               tri_count)
-           VALUES (:prefab_id, :prefab_name, :render_path, :part_count,
-                   :tri_count)""", scenes)
+        """INSERT INTO scenes (prefab_id, prefab_name, object_name, placements,
+                               render_path, part_count, tri_count)
+           VALUES (:prefab_id, :prefab_name, :object_name, :placements,
+                   :render_path, :part_count, :tri_count)""", scenes)
     conn.commit()
     return stats
 

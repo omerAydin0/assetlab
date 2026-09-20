@@ -250,12 +250,23 @@ def diagnose_staging(staging: Path) -> Diagnosis:
         result.add(OK, f"{data_dir.relative_to(root).as_posix()} -> {shown}"
                        + (f" (+{extra} more files)" if extra > 0 else ""))
 
+    # Two ways a build carries its script types, and a build has exactly one of
+    # them. IL2CPP compiles them away and leaves global-metadata.dat to describe
+    # what was lost; Mono ships the assemblies themselves under Managed/. Asking
+    # only for the metadata reported every Mono build as crippled while its
+    # Scripts/ tree exported perfectly well.
     metadata = [p for p in every if p.name == "global-metadata.dat"]
+    managed = [p for p in every
+               if p.suffix.lower() == ".dll" and p.parent.name.lower() == "managed"]
     if metadata:
         result.add(OK, "global-metadata.dat staged -> script types resolvable")
+    elif managed:
+        result.add(OK, f"{len(managed)} managed assemblies staged -> script types "
+                       "resolvable without IL2CPP metadata")
     else:
-        result.add(WARN, "no global-metadata.dat staged",
-                   "IL2CPP script types stay unresolved, so the export will have no "
+        result.add(WARN, "no script types staged: neither global-metadata.dat nor "
+                         "Managed/*.dll",
+                   "script types stay unresolved, so the export will have no "
                    "Scripts/ tree and no enum vocabulary to classify from")
 
     shared_objects = [p for p in every if p.name.startswith("lib") and p.suffix == ".so"]

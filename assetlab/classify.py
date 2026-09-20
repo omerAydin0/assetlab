@@ -677,11 +677,10 @@ def scan_prefab_roles(assets_root: Path, conn: sqlite3.Connection) -> dict[str, 
         "SELECT guid, rel_path FROM assets WHERE unity_type IN ('Prefab','Scene') AND guid IS NOT NULL"
     ).fetchall()
     for row in rows:
-        try:
-            blob = (assets_root / row["rel_path"]).read_bytes()
-        except OSError:
-            continue
-        found = {CLASS_ROLE[int(cid)] for cid in CLASS_ID_RE.findall(blob)
+        # Streamed, not read whole: a generated scene holds the same class ids as
+        # a prefab and several hundred megabytes of them.
+        found = {CLASS_ROLE[int(cid)]
+                 for cid in scan_class_ids(assets_root / row["rel_path"])
                  if int(cid) in CLASS_ROLE}
         if found:
             roles[row["guid"]] = [role for role in ROLE_PRIORITY if role in found]

@@ -11,7 +11,7 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from .core import GUID_RE, REFERENCING_EXT, connect
+from .core import REFERENCING_EXT, STREAM_ABOVE, connect, scan_guids
 
 
 def build_graph(assets_root: Path, conn: sqlite3.Connection) -> int:
@@ -29,14 +29,11 @@ def build_graph(assets_root: Path, conn: sqlite3.Connection) -> int:
         if "." + (Path(rel_path).suffix.lower().lstrip(".")) not in REFERENCING_EXT:
             continue
         path = assets_root / rel_path
-        try:
-            blob = path.read_bytes()
-        except OSError:
-            continue
         scanned += 1
         source_guid = row["guid"]
-        for match in GUID_RE.findall(blob):
-            target = match.decode("ascii")
+        # Streamed for every file: a scene assembled from a prop library runs to
+        # hundreds of megabytes, and reading one whole costs more than the stage.
+        for target in scan_guids(path):
             if target != source_guid and target in known:
                 edges.add((source_guid, target))
         if scanned % 500 == 0:

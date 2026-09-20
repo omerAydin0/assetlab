@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +33,28 @@ from .doctor import (BLOCKED, LEVELS_ABSENT, LEVELS_PARSED, LEVELS_UNREADABLE, P
                      diagnose_staging, level_verdict, staged_tree)
 from .ingest.stage import ingest
 from .run import analyse
+
+#: Written into an export directory once AssetRipper has finished with it.
+#: Nothing reuses an export that does not carry it.
+EXPORT_DONE = ".assetlab-export-complete"
+
+
+def export_has_content(export_dir: Path) -> bool:
+    """Whether anything was written into an export tree."""
+    assets = export_dir / "ExportedProject" / "Assets"
+    return assets.is_dir() and any(assets.iterdir())
+
+
+def export_is_reusable(export_dir: Path) -> bool:
+    """Whether an existing export may be used instead of exporting again.
+
+    Presence alone was the old test and it is not enough: an export that stopped
+    part way leaves a tree that looks finished and is missing whatever had not been
+    written. Every stage downstream then reports confident numbers about half a
+    build, which is the failure this pipeline exists to make impossible.
+    """
+    return export_has_content(export_dir) and (export_dir / EXPORT_DONE).is_file()
+
 
 @dataclass
 class Step:
@@ -210,10 +233,18 @@ def run_pipeline(input_path: Path, out: Path, title: str,
     # -------------------------------------------------------- 3. assetripper
     started = time.time()
     exported = export_dir / "ExportedProject" / "Assets"
-    export_project = restage or not (exported.is_dir() and any(exported.iterdir()))
+    # A present directory is not a finished export. An export that was interrupted -
+    # the machine slept, the session ended, AssetRipper was killed - leaves a tree
+    # that looks complete and is missing whatever had not been written yet. Every
+    # stage downstream then reports confident numbers about half a build. The marker
+    # is written last, so its absence is the one honest signal that it stopped early.
+    export_project = restage or not export_is_reusable(export_dir)
     if not export_project:
         steps.append(Step("assetripper", "reused", f"export already at {exported}",
                           time.time() - started))
+    elif export_has_content(export_dir):
+        print(f"WARN  {exported} exists but no {EXPORT_DONE}: the last export did not "
+              f"finish, so it is being redone", flush=True)
     # The opt-in second pass: a Primary Content export of the same load, read only for
     # the bundle records whose `m_Container` gives classification its provenance. A
     # path passed as --primary-content is used as it is instead.
@@ -236,6 +267,8 @@ def run_pipeline(input_path: Path, out: Path, title: str,
                 if export_project:
                     print(f"exporting  {export_dir}", flush=True)
                     exported = loaded.export_unity_project(export_dir)
+                    (export_dir / EXPORT_DONE).write_text(
+                        datetime.now(timezone.utc).isoformat(), encoding="utf-8")
                     steps.append(Step("assetripper", "ok", str(exported),
                                       time.time() - started))
                     stage, started = "primary export", time.time()
