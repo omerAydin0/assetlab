@@ -207,10 +207,13 @@ def collect(out_dir: Path, name: str) -> tuple[list[dict], dict] | None:
     scenes: list[dict] = []
     try:
         for row in conn.execute(
-            """SELECT prefab_id, prefab_name, render_path, part_count, tri_count
-                 FROM scenes ORDER BY tri_count DESC"""):
+            """SELECT prefab_id, prefab_name, object_name, placements, object_key,
+                      render_path, part_count, tri_count
+                 FROM scenes ORDER BY placements DESC, tri_count DESC"""):
             scenes.append({"g": name, "id": row["prefab_id"],
-                           "name": row["prefab_name"],
+                           "name": row["object_name"] or row["prefab_name"],
+                           "from": row["prefab_name"], "key": row["object_key"],
+                           "placements": row["placements"],
                            "render": prefix + row["render_path"],
                            "parts": row["part_count"], "tris": row["tri_count"]})
     except sqlite3.OperationalError:
@@ -258,6 +261,21 @@ def build(out_dir: Path, names: list[str]) -> dict:
         extra = f", {len(found)} models" if found else ""
         print(f"  {name:<14} {len(records):>7} previewable assets  [{verdict}]{extra}")
 
+    # Shared across every build on the page, not merely within one: two games
+    # built on the same engine bind the same handful of surfaces, and a model
+    # carrying a full copy of its material set is what made a single catalogue's
+    # page thirty megabytes heavier than it needed to be.
+    material_list: list = []
+    material_sets: dict[str, int] = {}
+    for entry in models:
+        shared = json.dumps(entry.get("materials") or [], sort_keys=True,
+                            separators=(",", ":"))
+        if shared not in material_sets:
+            material_sets[shared] = len(material_list)
+            material_list.append(entry.get("materials") or [])
+        entry["mat"] = material_sets[shared]
+        entry.pop("materials", None)
+
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     page = (PAGE.replace("__RIG_ENGINE__", RIG_ENGINE)
                 .replace("__MODEL_VIEW__", MODEL_VIEW)
@@ -265,6 +283,9 @@ def build(out_dir: Path, names: list[str]) -> dict:
                 .replace("__DATA__", payload)
                 .replace("__OBJECTS__", json.dumps(objects, ensure_ascii=False,
                                                    separators=(",", ":")))
+                .replace("__MATERIALS__", json.dumps(material_list,
+                                                     ensure_ascii=False,
+                                                     separators=(",", ":")))
                 .replace("__MODELS__", json.dumps(models, ensure_ascii=False,
                                                   separators=(",", ":")))
                 .replace("__SCENES__", json.dumps(scenes, ensure_ascii=False,

@@ -880,6 +880,34 @@ def dark_subject_checks() -> None:
           int(before.max()) <= 215, True)
 
 
+def placeholder_checks() -> None:
+    """Every blank a page template leaves must be filled by whoever builds it.
+
+    The two pages share their view code, so a new blank added for one of them is
+    silently inherited by the other. One was: the hub kept `__MATERIALS__` as
+    literal text, the script threw on it, and the whole hub rendered as an empty
+    screen - with nothing failing anywhere, because the page is only ever built
+    by a real run.
+    """
+    import re
+    from . import browser as browser_stage
+
+    web = Path(browser_stage.__file__).parent / "web"
+    shared = "".join((web / part).read_text(encoding="utf-8")
+                     for part in ("models.js", "rig.js"))
+    wanted = re.compile(r"__[A-Z][A-Z_]*__")
+    for page, builder in (("browser.html", "browser.py"), ("hub.html", "hub.py")):
+        blanks = set(wanted.findall((web / page).read_text(encoding="utf-8")))
+        blanks |= set(wanted.findall(shared))
+        source = (Path(browser_stage.__file__).parent / builder).read_text(
+            encoding="utf-8")
+        # The view blanks are filled by whoever injects the view, so both builders
+        # have to name all of them.
+        missing = sorted(b for b in blanks if f'"{b}"' not in source)
+        check(f"{builder} fills every blank {page} and its views leave",
+              missing, [])
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2362,6 +2390,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     cross_scene_merge_checks()
     solid_surface_checks()
     dark_subject_checks()
+    placeholder_checks()
     derived_schema_checks()
     classify_scan_checks()
     export_reuse_checks()
