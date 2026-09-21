@@ -159,8 +159,22 @@ const FIXTURE_MODELS = [{g: "Goliath", prefab_id: "p1", prefab_name: "Chair",
                          materials: [{name: "Wood", colour: {hex: "#8b5a2b"},
                                       textures: [{slot: "_BaseMap", name: "wood",
                                                   img: "wood.png"}]}]}];
-const FIXTURE_SCENES = [{g: "Goliath", id: "p1", name: "Chair", render: "r.png",
-                         parts: 1, tris: 900}];
+// Two objects out of one scene file. They share `prefab_id`, because that names the
+// file, and differ in `key`, which names the object. Matching on the file is what the
+// panel used to do and would now gather the whole level.
+FIXTURE_MODELS[0].key = 7;
+FIXTURE_MODELS.push({g: "Goliath", prefab_id: "s9", prefab_name: "Level",
+                     path: "Lamp", object_name: "Lamp", mesh_name: "SM_Lamp",
+                     mesh_bytes: 512, skinned: false, render: null, tris: 40,
+                     placements: 12, key: 8, materials: []});
+FIXTURE_MODELS.push({g: "Goliath", prefab_id: "s9", prefab_name: "Level",
+                     path: "Bench", object_name: "Bench", mesh_name: "SM_Bench",
+                     mesh_bytes: 700, skinned: false, render: null, tris: 90,
+                     placements: 3, key: 9, materials: []});
+const FIXTURE_SCENES = [{g: "Goliath", id: "p1", name: "Chair", key: 7, render: "r.png",
+                         parts: 1, tris: 900},
+                        {g: "Goliath", id: "s9", name: "Lamp", from: "Level", key: 8,
+                         placements: 12, render: "r.png", parts: 1, tris: 40}];
 
 // G. A mechanic's art is mostly loose sprites that belong to no object.
 const g1 = sprite("snowball_01", 30, 30);
@@ -257,6 +271,13 @@ check("an albedo stands for the surface where there is one",
       /wood\.png/.test(modelPanel(FIXTURE_MODELS[0])), true);
 check("a scene's parts are the models of that scene in that build",
       /Chair/.test(scenePanel(FIXTURE_SCENES[0])), true);
+check("an object out of a scene shows its own parts, not the whole file's",
+      /SM_Lamp/.test(scenePanel(FIXTURE_SCENES[1])) &&
+      /SM_Bench/.test(scenePanel(FIXTURE_SCENES[1])), false);
+check("and says how often its scene places it",
+      /placed 12/.test(sceneCard(FIXTURE_SCENES[1], 1)), true);
+check("a prefab, placed once by definition, is not counted at the reader",
+      /placed/.test(sceneCard(FIXTURE_SCENES[0], 0)), false);
 
 const split = familyObjects([DATA[a1], DATA[a2], DATA[g1]]);
 check("a family separates what comes apart from what does not",

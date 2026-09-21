@@ -280,7 +280,17 @@ def diagnose_staging(staging: Path) -> Diagnosis:
         result.add(OK, f"native libraries for {libs[0]}"
                        f"{' incl. libil2cpp.so' if il2cpp else ' (no libil2cpp.so)'}")
     else:
-        result.add(WARN, "no native libraries staged")
+        # Shared objects are how an Android IL2CPP build carries its compiled code.
+        # A desktop build names it GameAssembly.dll, and a Mono build has no such
+        # file at all because the code is in the assemblies. Warning in those two
+        # cases reported a complete build as short of something it never had.
+        native = [p for p in every if p.name.lower() == "gameassembly.dll"]
+        if native:
+            result.add(OK, "GameAssembly.dll staged -> IL2CPP code present")
+        elif managed:
+            result.add(OK, "no native library needed: the code is in the assemblies")
+        else:
+            result.add(WARN, "no native libraries staged")
 
     # A build ships either UnityFS bundles or loose SerializedFiles; counting only
     # the former makes a perfectly good SerializedFile game look empty.

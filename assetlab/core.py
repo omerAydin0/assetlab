@@ -222,7 +222,8 @@ CREATE TABLE IF NOT EXISTS models (
     matrix       TEXT,      -- JSON: 16 floats, the object's place inside its prefab
     render_path  TEXT,      -- this one mesh, drawn on its own
     tri_count    INTEGER,
-    vert_count   INTEGER
+    vert_count   INTEGER,
+    object_key   INTEGER  -- the object these meshes belong to, prefab or scene object
 );
 CREATE INDEX IF NOT EXISTS idx_models_prefab ON models(prefab_id);
 CREATE INDEX IF NOT EXISTS idx_models_mesh ON models(mesh_guid);
@@ -235,6 +236,7 @@ CREATE TABLE IF NOT EXISTS scenes (
     prefab_name TEXT,
     object_name TEXT,        -- null for a prefab: the file already names it
     placements  INTEGER,     -- how many times a scene places this same shape
+    object_key  INTEGER,     -- joins to models.object_key
     render_path TEXT,
     part_count  INTEGER,
     tri_count   INTEGER
@@ -265,7 +267,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     model_columns = {row[1] for row in conn.execute("PRAGMA table_info(models)")}
     for column, decl in (("matrix", "TEXT"), ("render_path", "TEXT"),
                          ("tri_count", "INTEGER"), ("vert_count", "INTEGER"),
-                         ("placements", "INTEGER")):
+                         ("placements", "INTEGER"), ("object_key", "INTEGER")):
         if column not in model_columns:
             conn.execute(f"ALTER TABLE models ADD COLUMN {column} {decl}")
 

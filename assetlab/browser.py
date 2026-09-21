@@ -313,14 +313,17 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
     try:
         for row in conn.execute(
             """SELECT prefab_id, prefab_name, path, object_name, mesh_name,
-                      mesh_bytes, skinned, materials, render_path, tri_count
-                 FROM models ORDER BY skinned DESC, tri_count DESC, mesh_name"""):
+                      mesh_bytes, skinned, materials, render_path, tri_count,
+                      placements, object_key
+                 FROM models ORDER BY placements DESC, skinned DESC, tri_count DESC,
+                          mesh_name"""):
             entry = {
                 "prefab_id": row["prefab_id"],
                 "prefab_name": row["prefab_name"], "path": row["path"],
                 "object_name": row["object_name"], "mesh_name": row["mesh_name"],
                 "mesh_bytes": row["mesh_bytes"], "skinned": bool(row["skinned"]),
                 "render": row["render_path"], "tris": row["tri_count"],
+                "placements": row["placements"], "key": row["object_key"],
                 "materials": json.loads(row["materials"]) if row["materials"] else [],
             }
             for material in entry["materials"]:
@@ -337,9 +340,13 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
     scenes: list[dict] = []
     try:
         for row in conn.execute(
-            """SELECT prefab_id, prefab_name, render_path, part_count, tri_count
-                 FROM scenes ORDER BY tri_count DESC"""):
-            scenes.append({"id": row["prefab_id"], "name": row["prefab_name"],
+            """SELECT prefab_id, prefab_name, object_name, placements, object_key,
+                      render_path, part_count, tri_count
+                 FROM scenes ORDER BY placements DESC, tri_count DESC"""):
+            scenes.append({"id": row["prefab_id"], "name": row["object_name"]
+                           or row["prefab_name"],
+                           "from": row["prefab_name"], "key": row["object_key"],
+                           "placements": row["placements"],
                            "render": row["render_path"], "parts": row["part_count"],
                            "tris": row["tri_count"]})
     except sqlite3.OperationalError:

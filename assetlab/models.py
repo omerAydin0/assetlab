@@ -561,7 +561,8 @@ def build(assets_root: Path, conn: sqlite3.Connection,
                 yield (row["id"], row["name"], entry["name"], entry["placements"],
                        entry["models"])
 
-    for holder_id, holder_name, object_label, placements, parsed in sources():
+    for object_key, (holder_id, holder_name, object_label, placements,
+                     parsed) in enumerate(sources()):
         scene_pieces, scene_triangles = [], 0
         for model in parsed:
             mesh = by_guid.get(model["mesh_guid"])
@@ -600,6 +601,7 @@ def build(assets_root: Path, conn: sqlite3.Connection,
                 "prefab_id": holder_id,
                 "prefab_name": holder_name,
                 "placements": placements,
+                "object_key": object_key,
                 "path": model["path"],
                 "object_name": object_label or model["name"],
                 "mesh_guid": model["mesh_guid"],
@@ -621,13 +623,12 @@ def build(assets_root: Path, conn: sqlite3.Connection,
             # carries the whole object rather than one of its parts - so it gets
             # the larger canvas. Single meshes stay small: there are thousands of
             # them, and at 320 they already read as what they are.
-            key = f"s{holder_id}" if object_label is None \
-                else f"s{holder_id}_{len(scenes)}"
-            path = renderer.draw(scene_pieces, key, size=SCENE_SIZE)
+            path = renderer.draw(scene_pieces, f"s{object_key}", size=SCENE_SIZE)
             if path:
                 scenes.append({"prefab_id": holder_id,
                                "prefab_name": holder_name,
                                "object_name": object_label,
+                               "object_key": object_key,
                                "placements": placements, "render_path": path,
                                "part_count": len(scene_pieces),
                                "tri_count": scene_triangles})
@@ -637,16 +638,18 @@ def build(assets_root: Path, conn: sqlite3.Connection,
     conn.executemany(
         """INSERT INTO models (prefab_id, prefab_name, path, object_name, mesh_guid,
                                mesh_name, mesh_bytes, skinned, materials, matrix,
-                               render_path, tri_count, vert_count, placements)
+                               render_path, tri_count, vert_count, placements,
+                               object_key)
            VALUES (:prefab_id, :prefab_name, :path, :object_name, :mesh_guid,
                    :mesh_name, :mesh_bytes, :skinned, :materials, :matrix,
-                   :render_path, :tri_count, :vert_count, :placements)""", rows)
+                   :render_path, :tri_count, :vert_count, :placements,
+                   :object_key)""", rows)
     conn.execute("DELETE FROM scenes")
     conn.executemany(
         """INSERT INTO scenes (prefab_id, prefab_name, object_name, placements,
-                               render_path, part_count, tri_count)
+                               object_key, render_path, part_count, tri_count)
            VALUES (:prefab_id, :prefab_name, :object_name, :placements,
-                   :render_path, :part_count, :tri_count)""", scenes)
+                   :object_key, :render_path, :part_count, :tri_count)""", scenes)
     conn.commit()
     return stats
 

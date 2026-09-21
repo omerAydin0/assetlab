@@ -451,6 +451,14 @@ def desktop_staging_checks() -> None:
            if c.status == WARN and "metadata" in c.message], [])
     check("its assemblies are what resolves the script types",
           any("managed assemblies staged" in c.message for c in report.checks), True)
+    check("and GameAssembly.dll is recognised as the native code it is",
+          any("GameAssembly.dll staged" in c.message for c in report.checks), True)
+    # The fixture has no manifest, which is a fair warning. Nothing about the code
+    # it ships is, because it ships all of it.
+    check("nothing about its code is reported missing",
+          [c.message for c in report.checks
+           if c.status == WARN and ("metadata" in c.message
+                                    or "native librar" in c.message)], [])
 
 
 #: Two copies of the same two-mesh prop, one of them renamed the way Unity renames a

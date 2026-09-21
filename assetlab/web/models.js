@@ -54,14 +54,20 @@ function modelCard(model, i){
     <b>${label}</b><s>${fromBuild(model)}${model.skinned ? "rigged · " : ""}${tris}${
       model.materials.length} material${model.materials.length === 1 ? "" : "s"}</s></div>`;
 }
+function placedTimes(entry){
+  // Only a scene object has this: a prefab is a file, and a file is placed once.
+  return entry.placements > 1 ? `placed ${entry.placements}× · ` : "";
+}
 function sceneCard(scene, i){
   return `<div class="card" data-scene="${i}">
     <img loading="lazy" class="render" src="${scene.render}" alt="">
-    <b>${scene.name}</b><s>${fromBuild(scene)}${scene.parts} parts ·
+    <b>${scene.name}</b><s>${fromBuild(scene)}${placedTimes(scene)}${scene.parts} parts ·
     ${scene.tris.toLocaleString()} tris</s></div>`;
 }
 function scenePanel(scene){
-  const parts = MODELS.filter(m => m.g === scene.g && m.prefab_id === scene.id);
+  // Keyed on the object, not the file it came from: one scene file holds
+  // thousands of objects, and matching on the file would gather the whole level.
+  const parts = MODELS.filter(m => m.g === scene.g && m.key === scene.key);
   const strip = parts.map(m => `<figure>${m.render ? `<img src="${m.render}">` : ""}
     <figcaption>${m.mesh_name || m.object_name || "?"}</figcaption></figure>`).join("");
   return `<button class="close"
@@ -69,7 +75,9 @@ function scenePanel(scene){
     <h2>${scene.name}</h2>
     <img class="render" style="max-width:420px" src="${scene.render}">
     <p style="color:var(--dim)">${scene.parts} parts, ${scene.tris.toLocaleString()}
-      triangles, assembled from the prefab's own transforms.</p>
+      triangles, assembled from the object's own transforms.${
+      scene.placements > 1 ? ` Its scene places this same shape ${scene.placements}
+      times; it is shown once.` : ""}</p>
     <div class="partstrip">${strip}</div>`;
 }
 function modelPanel(model){
@@ -95,7 +103,7 @@ function modelPanel(model){
     <p style="color:var(--dim);font-size:13px;margin:4px 0">Geometry is not rendered
       here. What is shown is the surface it is drawn with.</p>
     <h3>materials <span>${model.materials.length}</span></h3>${rows}
-    <dl><dt>prefab</dt><dd>${model.prefab_name}</dd>
+    <dl><dt>from</dt><dd>${model.prefab_name}</dd>
         <dt>path</dt><dd>${model.path || "(root)"}</dd></dl>`;
 }
 
