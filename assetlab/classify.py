@@ -152,6 +152,11 @@ BOARD_ENUM_RE = re.compile(
 # Every build also names menus, shops and telemetry with the same `...ItemType`
 # suffix; those enums describe the interface, not the board, and letting them in
 # turns shop rows and tooltip icons into obstacles.
+#: The Unity type names an export uses, lowercased, as words rather than folders.
+#: A name or a folder that is one of these says what an asset is, never what it is
+#: for.
+TYPE_WORDS = {value.lower() for value in FOLDER_TYPE.values()} | set(FOLDER_TYPE)
+
 NON_BOARD_ENUM_RE = re.compile(
     r"audio|haptic|reward|offer|shop|dialog|tooltip|icon|view|panel|button|section|"
     r"invite|metric|easing|bundle|event|feature|config|origin|sort|stat|mission|"
@@ -930,8 +935,14 @@ def classify(assets_root: Path, primary_content: Path | None,
         prefix = NAME_PREFIX_RE.match(lowered)
         if prefix:
             candidate = prefix.group(1)
+            # An exporter names what a build left unnamed after its Unity type -
+            # `Texture2D_0`, `Mesh_17` - so the prefix is the type again. Taken as
+            # a feature it labelled 26,799 assets of one build `texture2d`: every
+            # texture it ships, under one word, saying nothing about any of them.
             if (candidate not in GENERIC_PREFIXES and not HEX_NAME_RE.match(candidate)
-                    and not NUMBERED_PREFIX_RE.match(candidate)):
+                    and not NUMBERED_PREFIX_RE.match(candidate)
+                    and candidate not in FOLDER_TYPE
+                    and candidate not in TYPE_WORDS):
                 add(tags, asset_id, "feature", candidate, "medium", "filename")
                 primary_feature = primary_feature or candidate
         for subcategory, tokens in SUBCATEGORY_RULES:

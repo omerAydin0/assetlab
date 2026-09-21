@@ -921,6 +921,12 @@ def vocabulary_noise_checks() -> None:
           feature_from_project_dir("_Studio/Gameplay/Items/CrateItem/x.prefab"),
           ("CrateItem", "Items"))
 
+    from .classify import TYPE_WORDS
+    # An exporter names what a build left unnamed after its Unity type, so the
+    # filename prefix is the type again.
+    check("a Unity type is never a feature, as a folder or as a name",
+          {"texture2d", "mesh", "audioclip"} <= TYPE_WORDS, True)
+
     # A build shipping a keyboard sprite sheet puts End, Tab, Space and Escape in
     # the asset vocabulary, so the enum naming them read as gameplay.
     for engine_enum in ("KeyCode", "PlatformType", "InputDevice", "ScreenResolution"):
