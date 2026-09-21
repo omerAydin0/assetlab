@@ -709,6 +709,49 @@ def uncoloured_material_checks() -> None:
           piece is not None, True)
 
 
+def cross_scene_merge_checks() -> None:
+    """A prop two levels both use is one object, with both levels' placements."""
+    from . import models as models_stage
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("Level_A.unity", "Level_B.unity"):
+            (root / name).write_text(TWO_PROPS_SCENE, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            for index, name in enumerate(("Level_A.unity", "Level_B.unity"), start=1):
+                conn.execute(
+                    "INSERT INTO assets (id, guid, rel_path, name, unity_type, ext, "
+                    "size_bytes) VALUES (?,?,?,?,'Scene','unity',?)",
+                    (index, f"{index:032x}", name, name[:-6],
+                     (root / name).stat().st_size))
+            # The meshes the scenes draw: a model is only recorded when its mesh or
+            # its material is an asset the index knows about.
+            for index, letter in enumerate("abd", start=10):
+                conn.execute(
+                    "INSERT INTO assets (id, guid, rel_path, name, unity_type, ext, "
+                    "size_bytes) VALUES (?,?,?,?,'Mesh','asset',64)",
+                    (index, letter * 32, f"Mesh/{letter}.asset", f"SM_{letter}"))
+            conn.commit()
+            stats = models_stage.build(root, conn)
+            rows = list(conn.execute(
+                "SELECT object_name, placements, COUNT(*) AS meshes, "
+                "MIN(prefab_name) AS source FROM models "
+                "GROUP BY object_key ORDER BY placements DESC"))
+        finally:
+            conn.close()
+
+    check("both scenes were read", stats["scene_files"], 2)
+    check("the second scene's copies are recognised, not re-added",
+          stats["scene_objects_repeated"], 2)
+    check("so the build holds one object per distinct prop",
+          stats["scene_objects"], 2)
+    check("and the shared prop carries both scenes' placements",
+          [(r["object_name"], r["placements"], r["meshes"]) for r in rows],
+          [("Bench", 4, 2), ("Lamp", 2, 1)])
+    check("the object is attributed to the scene it was first found in",
+          rows[0]["source"], "Level_A")
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2188,6 +2231,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     desktop_staging_checks()
     scene_object_checks()
     uncoloured_material_checks()
+    cross_scene_merge_checks()
     export_reuse_checks()
     deep_hierarchy_checks()
     stream_checks()

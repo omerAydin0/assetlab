@@ -361,6 +361,7 @@ def parse_scene_objects(path: Path, cap: int = SCENE_SEGMENT_CAP) -> list[dict]:
         label = names.get(transforms[first]["go"], "")
         models = _models(gathered, placed, only=subtree)
         objects.append({
+            "shape": key,
             "name": label or "(unnamed)",
             "path": node_paths.get(transforms[first]["go"], ""),
             "placements": len(members),
@@ -536,17 +537,30 @@ def build(assets_root: Path, conn: sqlite3.Connection,
     stats = {"prefabs": len(prefabs), "models": 0, "skinned": 0,
              "textured": 0, "flat_colour": 0, "rendered": 0, "scenes": 0,
              "scene_files": 0, "scene_files_skipped": 0, "scene_objects": 0,
-             "scene_placements": 0}
-    def sources():
-        """Every object to draw: one per prefab file, then one per scene object."""
+             "scene_objects_repeated": 0, "scene_placements": 0}
+    def collect_sources() -> list[tuple]:
+        """Every object to draw: one per prefab file, then one per distinct object
+        found across the scenes.
+
+        The merge across scenes matters as much as the one inside a scene. A build
+        that generates its levels assembles all of them from the same prop library,
+        so the same fern is authored once and appears in every level. Reported per
+        scene it becomes five objects with five pictures under five level names,
+        which is both five times the work and a library that lies about how much is
+        in the build. The shape key already says they are the same thing; here the
+        placements are added up and the object is drawn once.
+        """
+        found: list[tuple] = []
         for prefab in prefabs:
             try:
-                text = (assets_root / prefab["rel_path"]).read_text(
+                body = (assets_root / prefab["rel_path"]).read_text(
                     encoding="utf-8", errors="ignore")
             except OSError:
                 continue
-            yield prefab["id"], prefab["name"], None, 1, parse_prefab_models(text)
+            found.append([prefab["id"], prefab["name"], None, 1,
+                          parse_prefab_models(body)])
 
+        seen: dict[int, list] = {}
         budget = scene_budget
         for size, row in scene_files:
             if size > budget:
@@ -560,13 +574,28 @@ def build(assets_root: Path, conn: sqlite3.Connection,
                 continue
             stats["scene_files"] += 1
             for entry in objects:
-                stats["scene_objects"] += 1
                 stats["scene_placements"] += entry["placements"]
-                yield (row["id"], row["name"], entry["name"], entry["placements"],
-                       entry["models"])
+                already = seen.get(entry["shape"])
+                if already is not None:
+                    already[3] += entry["placements"]
+                    stats["scene_objects_repeated"] += 1
+                    continue
+                stats["scene_objects"] += 1
+                record = [row["id"], row["name"], entry["name"],
+                          entry["placements"], entry["models"]]
+                seen[entry["shape"]] = record
+                found.append(record)
+        return found
 
+    prepared = collect_sources()
+    print(f"  {len(prepared)} objects to draw "
+          f"({stats['scene_files']} scenes read, "
+          f"{stats['scene_files_skipped']} left for the budget)", flush=True)
     for object_key, (holder_id, holder_name, object_label, placements,
-                     parsed) in enumerate(sources()):
+                     parsed) in enumerate(prepared):
+        if object_key and object_key % 250 == 0:
+            print(f"  {object_key}/{len(prepared)} objects, "
+                  f"{stats['rendered']} meshes drawn", flush=True)
         scene_pieces, scene_triangles = [], 0
         for model in parsed:
             mesh = by_guid.get(model["mesh_guid"])
