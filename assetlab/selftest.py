@@ -806,6 +806,53 @@ def solid_surface_checks() -> None:
           round(float(box.mean()), 2) > 0.70, True)
 
 
+def derived_schema_checks() -> None:
+    """A derived table gains a column; an older database must be rebuilt to match.
+
+    The rebuild was keyed on one of the two columns the scenes table gained, so a
+    database written between the two changes kept an out-of-date shape and the
+    stage that fills it died on the insert - after half an hour of drawing.
+    """
+    import sqlite3 as sql
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "old.db"
+        raw = sql.connect(path)
+        raw.execute("""CREATE TABLE scenes (prefab_id INTEGER PRIMARY KEY,
+                       prefab_name TEXT, object_name TEXT, render_path TEXT,
+                       part_count INTEGER, tri_count INTEGER)""")
+        raw.commit()
+        raw.close()
+        conn = connect(path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scenes)")}
+        finally:
+            conn.close()
+    check("an outdated derived table is brought up to date, not left short",
+          {"object_key", "placements"} <= columns, True)
+
+
+def classify_scan_checks() -> None:
+    """The role scan reads a holder's class ids straight off disk."""
+    from .classify import scan_prefab_roles
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Thing.prefab").write_text(PAIR_PREFAB, encoding="utf-8")
+        conn = connect(root / "t.db")
+        try:
+            conn.execute(
+                "INSERT INTO assets (id, guid, rel_path, name, unity_type, ext) "
+                "VALUES (1, ?, 'Thing.prefab', 'Thing', 'Prefab', 'prefab')",
+                ("a" * 32,))
+            conn.commit()
+            # Calling it at all is the point: the scanner reached for a helper the
+            # module never imported, and only a real build found out.
+            roles = scan_prefab_roles(root, conn)
+        finally:
+            conn.close()
+    check("a prefab full of sprite renderers reads as world art",
+          bool(roles.get("a" * 32)), True)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2287,6 +2334,8 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     uncoloured_material_checks()
     cross_scene_merge_checks()
     solid_surface_checks()
+    derived_schema_checks()
+    classify_scan_checks()
     export_reuse_checks()
     deep_hierarchy_checks()
     stream_checks()

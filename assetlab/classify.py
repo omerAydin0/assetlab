@@ -19,7 +19,7 @@ import sqlite3
 from collections import defaultdict, deque
 from pathlib import Path
 
-from .core import FOLDER_TYPE, connect
+from .core import FOLDER_TYPE, connect, scan_class_ids
 
 # Unity component class ids are stable across versions.
 CLASS_ROLE = {

@@ -260,7 +260,7 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # `scenes` is purely derived, and its key changed when a scene - which holds
     # many objects rather than being one - became a source.
     scene_columns = {row[1] for row in conn.execute("PRAGMA table_info(scenes)")}
-    if scene_columns and "object_name" not in scene_columns:
+    if scene_columns and not {"object_name", "object_key"} <= scene_columns:
         conn.execute("DROP TABLE scenes")
         conn.executescript(SCHEMA)
 
