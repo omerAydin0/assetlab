@@ -437,7 +437,11 @@ class Renderer:
                         break
             if texture is not None:
                 break
-            if detail.get("colour", {}).get("rgb"):
+            # `colour` is present and None when the material bound no colour at
+            # all, which a default `{}` does not catch. Every build read before this
+            # one coloured every material, so the hole only opened on a build that
+            # leaves surfaces to the shader.
+            if (detail.get("colour") or {}).get("rgb"):
                 colour = tuple(detail["colour"]["rgb"])
         return Piece(mesh=mesh, transform=matrix, colour=colour, texture=texture)
 

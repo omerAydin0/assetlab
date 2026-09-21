@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import time
+import traceback
 from pathlib import Path
 
 from . import (animations, browser, classify, dedup, graph, index, levels, models,
@@ -95,7 +96,21 @@ def analyse(export: Path, out: Path, title: str = "AssetLab",
             continue
         started = time.time()
         print(f"[{name}] ...", flush=True)
-        result = run_stage()
+        try:
+            result = run_stage()
+        except Exception as problem:            # noqa: BLE001 - see below
+            # One stage failing must not cost the stages after it. An hour of
+            # staging and export stood behind this loop and a single unhandled
+            # AttributeError threw all of it away, along with the pages that would
+            # have been built from work already done. The failure is recorded, not
+            # swallowed: it is printed, kept in the results, and the doctor reads
+            # the catalogue afterwards and reports what is missing from it.
+            elapsed = time.time() - started
+            trace = traceback.format_exc().strip().splitlines()[-1]
+            print(f"[{name}] FAILED after {elapsed:.1f}s: {trace}", flush=True)
+            traceback.print_exc()
+            results[name] = {"failed": trace, "seconds": round(elapsed, 1)}
+            continue
         elapsed = time.time() - started
         print(f"[{name}] done in {elapsed:.1f}s -> {result}")
         results[name] = {"result": result, "seconds": round(elapsed, 1)}

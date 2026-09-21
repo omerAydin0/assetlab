@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.server
 import tempfile
+import types
 import threading
 import urllib.parse
 from pathlib import Path
@@ -678,6 +679,34 @@ def export_reuse_checks() -> None:
         (export / EXPORT_DONE).write_text("2026-09-20", encoding="utf-8")
         check("an export that finished is reusable",
               export_is_reusable(export), True)
+
+
+def uncoloured_material_checks() -> None:
+    """A material may bind neither texture nor colour, and still has to be drawn."""
+    import numpy as np
+    from .models import Renderer
+    parsed = parse_material("""Material:
+  m_Name: Plain
+  m_SavedProperties:
+    m_TexEnvs:
+    - _BaseMap:
+        m_Texture: {fileID: 0}
+    m_Colors: []
+""")
+    check("a material with nothing bound reports no colour",
+          parsed["colour"], None)
+    with tempfile.TemporaryDirectory() as tmp:
+        renderer = Renderer(Path(tmp), Path(tmp))
+        mesh = types.SimpleNamespace(
+            vertices=np.zeros((3, 3), dtype=np.float32),
+            triangles=np.array([[0, 1, 2]], dtype=np.int32),
+            uvs=None, normals=None, bindpose=None)
+        # The default `{}` in `detail.get("colour", {})` does not catch a key that is
+        # present and None, so this raised AttributeError and took the whole run with
+        # it an hour into a build.
+        piece = renderer.piece(mesh, [parsed])
+    check("and drawing it falls back to the default colour instead of raising",
+          piece is not None, True)
 
 
 def corpus_checks() -> None:
@@ -2158,6 +2187,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     absent_tree_checks()
     desktop_staging_checks()
     scene_object_checks()
+    uncoloured_material_checks()
     export_reuse_checks()
     deep_hierarchy_checks()
     stream_checks()
