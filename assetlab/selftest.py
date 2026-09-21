@@ -752,6 +752,60 @@ def cross_scene_merge_checks() -> None:
           rows[0]["source"], "Level_A")
 
 
+def solid_surface_checks() -> None:
+    """A closed mesh must come out solid; holes in it are a renderer bug.
+
+    Nothing here checked that a render is watertight, so an optimisation that
+    collapsed near-pixel triangles to their centre pixel passed every test while
+    turning a smooth surface into lace. The subject is a sphere because a sphere
+    is the hardest case that is still unambiguous: every triangle is small, the
+    silhouette is known, and any gap shows.
+    """
+    import numpy as np
+    from .mesh import Piece, render
+
+    # Dense enough that a triangle lands on about one pixel, which is the regime
+    # the bug lived in: at a coarser tessellation every triangle is several pixels
+    # wide and any shortcut taken on small ones never fires.
+    rings, segments = 40, 80
+    points, faces = [], []
+    for ring in range(rings + 1):
+        theta = np.pi * ring / rings
+        for seg in range(segments):
+            phi = 2 * np.pi * seg / segments
+            points.append([np.sin(theta) * np.cos(phi), np.cos(theta),
+                           np.sin(theta) * np.sin(phi)])
+    for ring in range(rings):
+        for seg in range(segments):
+            a = ring * segments + seg
+            b = ring * segments + (seg + 1) % segments
+            c = a + segments
+            d = b + segments
+            faces += [[a, b, c], [b, d, c]]
+    mesh = types.SimpleNamespace(
+        vertices=np.array(points, dtype=np.float32),
+        triangles=np.array(faces, dtype=np.int32),
+        normals=np.array(points, dtype=np.float32), uvs=None,
+        submesh_ranges=[], bindpose=None)
+
+    # Rendered the way the stage renders, with the facing left to the probes. Given
+    # a yaw the probes never run, and the bug that made this check necessary lived
+    # in them: the probe's triangle sample was assigned over the parameter holding
+    # it, so the picture drawn afterwards was sampled too.
+    size = 64
+    image = render([Piece(mesh=mesh, transform=None, colour=(200, 200, 200),
+                          texture=None)], size=size)
+    pixels = np.asarray(image.convert("RGB")).astype(int)
+    painted = np.abs(pixels - np.array([14, 16, 20])).sum(axis=2) > 24
+    rows = np.nonzero(painted.any(axis=1))[0]
+    columns = np.nonzero(painted.any(axis=0))[0]
+    box = painted[rows[0]:rows[-1] + 1, columns[0]:columns[-1] + 1]
+    # A sphere fills pi/4 of its bounding box, so anything near that is solid and
+    # anything far below it has holes in it.
+    check("a sphere is drawn solid, not as lace",
+          round(float(box.mean()), 2) > 0.70, True)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2232,6 +2286,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     scene_object_checks()
     uncoloured_material_checks()
     cross_scene_merge_checks()
+    solid_surface_checks()
     export_reuse_checks()
     deep_hierarchy_checks()
     stream_checks()

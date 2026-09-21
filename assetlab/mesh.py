@@ -415,6 +415,9 @@ LIGHT /= np.linalg.norm(LIGHT)
 #: that a three-quarter camera already distinguishes.
 FACINGS = (-30.0, 60.0, 150.0, 240.0)
 PROBE_SIZE = 112
+#: How many triangles a probe render draws at most. A 112-square image cannot
+#: show more silhouette than this, and the probe only has to rank four angles.
+PROBE_TRIANGLES = 1200
 
 
 def interest(image: Image.Image) -> float:
@@ -440,17 +443,29 @@ def interest(image: Image.Image) -> float:
 
 def render(pieces: list[Piece], size: int = 384,
            background: tuple[int, int, int] = (14, 16, 20),
-           yaw: float | None = None) -> Image.Image | None:
+           yaw: float | None = None, stride: int = 1) -> Image.Image | None:
     """Draw the pieces together, orthographic, z-buffered, lit from one direction."""
     pieces = [p for p in pieces if p.mesh is not None and len(p.mesh.triangles)]
     if not pieces:
         return None
 
     if yaw is None:
+        # Four probe renders decide which way round to draw the thing, and they
+        # were costing four times what the picture itself costs: the per-triangle
+        # work is the same at 112 square as at 320, because it is loop overhead
+        # rather than pixels. The probe only has to say which angle shows the most,
+        # and that judgement does not need every triangle - so a dense mesh is
+        # probed on a regular sample of its triangles, which keeps the silhouette
+        # it is judging while cutting the count to something the size can show.
+        total = sum(len(p.mesh.triangles) for p in pieces)
+        # Its own name: assigning to `stride` here overwrote the parameter, and the
+        # picture this call went on to draw was sampled too, which is what turned a
+        # smooth surface into a lattice of loose triangles.
+        probe_stride = max(1, total // PROBE_TRIANGLES)
         best, best_score = FACINGS[0], -1.0
         for candidate in FACINGS:
             probe = render(pieces, size=PROBE_SIZE, background=background,
-                           yaw=candidate)
+                           yaw=candidate, stride=probe_stride)
             score = interest(probe) if probe else 0.0
             if score > best_score:
                 best, best_score = candidate, score
@@ -501,6 +516,8 @@ def render(pieces: list[Piece], size: int = 384,
             first, run = piece.mesh.submesh_ranges[piece.submesh]
             triangles = triangles[first:first + run]
 
+        if stride > 1:
+            triangles = triangles[::stride]
         base = np.array(piece.colour, dtype=np.float32)
         _rasterise(triangles, screen, normals, piece, base,
                    colour_buffer, depth_buffer, size)
