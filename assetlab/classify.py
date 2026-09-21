@@ -160,6 +160,11 @@ NON_BOARD_ENUM_RE = re.compile(
     r"profile|inventory|sale|chat|team|player|row|daily|deal|warning|content|flow|"
     r"source|activation|atlas|mask|position|group|slot|fortune|modifier|special|"
     r"generated|layer|fade|admin|debug|test|"
+    # How a build is played and where it runs, neither of which is a mechanic. A
+    # PC build ships a keyboard sprite sheet, so `Key`'s members - End, Tab,
+    # Space, Escape - all matched an asset name and were reported as gameplay.
+    r"key|input|platform|device|controller|gamepad|binding|locale|language|"
+    r"resolution|screen|quality|graphic|"
     # `GoalUpdateType` is how a counter changes and `BlockUseType` is where a piece
     # is being shown; both end in a board word and describe neither.
     r"updatetype|usetype",
@@ -555,6 +560,12 @@ GENERIC_DIRS = {"prefab", "prefabs", "sprites", "sprite", "textures", "texture",
 def feature_from_project_dir(rel_path: str) -> tuple[str | None, str | None]:
     """`_Studio/Gameplay/Items/CrateItem/x.prefab` -> ('CrateItem', 'Items')."""
     parts = Path(rel_path).parts
+    # An export groups whatever a build did not file itself by Unity type -
+    # `Texture2D/`, `Sprite/`, `Mesh/`. That says what a thing is, not what it is
+    # for, and reading it as a feature labelled 26,799 assets of one build
+    # `texture2d`, which is every texture it ships and no information at all.
+    if parts and parts[0].lower() in FOLDER_TYPE:
+        parts = parts[1:]
     if len(parts) < 2 or parts[0].lower() in ENGINE_ROOTS:
         return None, None
     meaningful = [part for part in parts[1:-1] if part.lower() not in GENERIC_DIRS]

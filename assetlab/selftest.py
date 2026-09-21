@@ -908,6 +908,29 @@ def placeholder_checks() -> None:
               missing, [])
 
 
+def vocabulary_noise_checks() -> None:
+    """Neither the type an asset is nor the keyboard it is drawn on is a feature."""
+    from .classify import NON_BOARD_ENUM_RE
+
+    # An export files whatever the build did not file itself under the Unity type.
+    check("a type folder is what a thing is, not what it is for",
+          feature_from_project_dir("Texture2D/wood.png"), (None, None))
+    check("but a build's own folders below one still name the feature",
+          feature_from_project_dir("Sprite/Gameplay/Items/crate.asset")[0], "Items")
+    check("and a build that files its own assets is untouched",
+          feature_from_project_dir("_Studio/Gameplay/Items/CrateItem/x.prefab"),
+          ("CrateItem", "Items"))
+
+    # A build shipping a keyboard sprite sheet puts End, Tab, Space and Escape in
+    # the asset vocabulary, so the enum naming them read as gameplay.
+    for engine_enum in ("KeyCode", "PlatformType", "InputDevice", "ScreenResolution"):
+        check(f"{engine_enum} is not a mechanic vocabulary",
+              bool(NON_BOARD_ENUM_RE.search(engine_enum)), True)
+    for gameplay_enum in ("ObstacleType", "BoosterType", "GoalKind"):
+        check(f"{gameplay_enum} still is one",
+              bool(NON_BOARD_ENUM_RE.search(gameplay_enum)), False)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2391,6 +2414,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     solid_surface_checks()
     dark_subject_checks()
     placeholder_checks()
+    vocabulary_noise_checks()
     derived_schema_checks()
     classify_scan_checks()
     export_reuse_checks()
