@@ -853,6 +853,33 @@ def classify_scan_checks() -> None:
           bool(roles.get("a" * 32)), True)
 
 
+def dark_subject_checks() -> None:
+    """A dark object must still read against a dark page."""
+    import numpy as np
+    from .mesh import Piece, render
+
+    points = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], dtype=np.float32)
+    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    mesh = types.SimpleNamespace(vertices=points, triangles=faces, normals=None,
+                                 uvs=None, submesh_ranges=[], bindpose=None)
+    background = (14, 16, 20)
+    # A rock texture this dark is ordinary in a build lit by a bright sky; drawn
+    # with one lamp and no ambient it came out as a black square on a black page.
+    image = render([Piece(mesh=mesh, transform=None, colour=(26, 26, 28),
+                          texture=None)], size=48, background=background)
+    pixels = np.asarray(image.convert("RGB")).astype(int)
+    lit = pixels.reshape(-1, 3).max(axis=1).max()
+    check("a near-black subject is lifted clear of the page behind it",
+          int(lit) > 90, True)
+
+    # And a subject that is already bright is left where it is.
+    bright = render([Piece(mesh=mesh, transform=None, colour=(210, 200, 190),
+                           texture=None)], size=48, background=background)
+    before = np.asarray(bright.convert("RGB")).astype(int).reshape(-1, 3).max(axis=1)
+    check("one that is already bright is not pushed further",
+          int(before.max()) <= 215, True)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2334,6 +2361,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     uncoloured_material_checks()
     cross_scene_merge_checks()
     solid_surface_checks()
+    dark_subject_checks()
     derived_schema_checks()
     classify_scan_checks()
     export_reuse_checks()

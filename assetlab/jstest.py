@@ -153,12 +153,15 @@ const objPartial = object("box", j2, [j1, j3], DATA.length - 1);
 
 // K. The model view, which both pages share. The hub names the build a model came
 //    from and a per-build page has no builds to name, so the same code has to do both.
+// The material sets live apart from the models and are referenced by index, so a
+// model that shares a surface with a thousand others carries a number, not a copy.
+const FIXTURE_MATERIALS = [[{name: "Wood", colour: {hex: "#8b5a2b"},
+                             textures: [{slot: "_BaseMap", name: "wood",
+                                         img: "wood.png"}]}], []];
 const FIXTURE_MODELS = [{g: "Goliath", prefab_id: "p1", prefab_name: "Chair",
                          path: "Chair", object_name: "Seat", mesh_name: "SM_Seat",
                          mesh_bytes: 2048, skinned: false, render: null, tris: 900,
-                         materials: [{name: "Wood", colour: {hex: "#8b5a2b"},
-                                      textures: [{slot: "_BaseMap", name: "wood",
-                                                  img: "wood.png"}]}]}];
+                         mat: 0}];
 // Two objects out of one scene file. They share `prefab_id`, because that names the
 // file, and differ in `key`, which names the object. Matching on the file is what the
 // panel used to do and would now gather the whole level.
@@ -166,11 +169,11 @@ FIXTURE_MODELS[0].key = 7;
 FIXTURE_MODELS.push({g: "Goliath", prefab_id: "s9", prefab_name: "Level",
                      path: "Lamp", object_name: "Lamp", mesh_name: "SM_Lamp",
                      mesh_bytes: 512, skinned: false, render: null, tris: 40,
-                     placements: 12, key: 8, materials: []});
+                     placements: 12, key: 8, mat: 1});
 FIXTURE_MODELS.push({g: "Goliath", prefab_id: "s9", prefab_name: "Level",
                      path: "Bench", object_name: "Bench", mesh_name: "SM_Bench",
                      mesh_bytes: 700, skinned: false, render: null, tris: 90,
-                     placements: 3, key: 9, materials: []});
+                     placements: 3, key: 9, mat: 1});
 const FIXTURE_SCENES = [{g: "Goliath", id: "p1", name: "Chair", key: 7, render: "r.png",
                          parts: 1, tris: 900},
                         {g: "Goliath", id: "s9", name: "Lamp", from: "Level", key: 8,
@@ -260,6 +263,8 @@ check("a panel that can only show part of an object says which part",
       /holds 1 of the 3 sprites on screen/.test(
         objectPanel(FIXTURE_OBJECTS[objPartial]).replace(/\s+/g, " ")), true);
 
+check("a model finds the material set it points at",
+      MODELS[0].materials.length === 1 && MODELS[0].materials[0].name === "Wood", true);
 check("a model card names its mesh and its materials",
       /SM_Seat/.test(modelCard(FIXTURE_MODELS[0], 0)) &&
       /1 material/.test(modelCard(FIXTURE_MODELS[0], 0)), true);
@@ -324,6 +329,7 @@ def run(browser: Path | None = None) -> dict:
                 .replace("__RIG_ENGINE__", RIG_ENGINE)
                 .replace("__MODEL_VIEW__",
                          MODEL_VIEW.replace("__MODELS__", "FIXTURE_MODELS")
+                                   .replace("__MATERIALS__", "FIXTURE_MATERIALS")
                                    .replace("__SCENES__", "FIXTURE_SCENES"))
                 .replace("__SHARED_VIEWS__",
                          SHARED_VIEWS.replace("__OBJECTS__", "FIXTURE_OBJECTS"))

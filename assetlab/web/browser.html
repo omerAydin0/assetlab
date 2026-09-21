@@ -146,6 +146,10 @@ aside.wide{width:min(900px,96vw)}
 <aside id="panel"></aside>
 <script>
 const DATA = __DATA__;
+// `href` is written into the payload only when it differs from `img`; for an
+// image asset the two are the same string, and a build with a hundred
+// thousand of them paid twelve megabytes of page for repeating it.
+for (const d of DATA) if (!d.href) d.href = d.img;
 const F = ["role","feature","mechanic","type"];
 const el = id => document.getElementById(id);
 
@@ -322,7 +326,7 @@ function render(reset){
       const scenes = SCENES.filter(s => !query ||
         s.name.toLowerCase().includes(query));
       const assembled = scenes.length && !query
-        ? `<div class="scenehead">assembled prefabs</div>
+        ? `<div class="scenehead">assembled objects</div>
            <div class="scenestrip">${scenes.map(sceneCard).join("")}</div>
            <div class="scenehead">individual meshes</div>` : "";
       el("grid").innerHTML = assembled +

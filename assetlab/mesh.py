@@ -522,7 +522,41 @@ def render(pieces: list[Piece], size: int = 384,
         _rasterise(triangles, screen, normals, piece, base,
                    colour_buffer, depth_buffer, size)
 
+    _expose(colour_buffer, depth_buffer, background)
     return Image.fromarray(np.clip(colour_buffer, 0, 255).astype(np.uint8))
+
+
+#: What the brightest part of a subject should reach, and how far the picture may
+#: be lifted to get it there. A cap matters: without one, a genuinely black object
+#: is amplified into grey noise and claims detail it does not have.
+EXPOSURE_TARGET = 190.0
+#: Measured, not chosen: the darkest rock in a real build sat at a 95th-percentile
+#: brightness of 22 against a target of 190, so it needs 8.6. Ten leaves a little
+#: room and still refuses to make something out of a subject that is truly black.
+EXPOSURE_MAX_GAIN = 10.0
+
+
+def _expose(colour_buffer, depth_buffer, background) -> None:
+    """Lift a subject that came out too dark to tell from the page behind it.
+
+    A build lights its world with a sky; this draws with one lamp and no ambient,
+    so a dark albedo stays dark. On a near-black page that is a black square where
+    a rock should be - measured on a real catalogue, the most-placed rock in the
+    build was drawn at a brightness the page could not separate from its own
+    background. The lift is measured from the subject alone, not the background,
+    and applied to the subject alone, so the page keeps its own contrast.
+    """
+    drawn = np.isfinite(depth_buffer)
+    if not drawn.any():
+        return
+    subject = colour_buffer[drawn]
+    # The 95th percentile rather than the maximum: one specular pixel should not
+    # decide the exposure for the whole thing.
+    brightest = float(np.percentile(subject.max(axis=1), 95))
+    if brightest <= 1.0 or brightest >= EXPOSURE_TARGET:
+        return
+    gain = min(EXPOSURE_TARGET / brightest, EXPOSURE_MAX_GAIN)
+    colour_buffer[drawn] = np.clip(subject * gain, 0, 255)
 
 
 def _rasterise(triangles, screen, normals, piece, base,

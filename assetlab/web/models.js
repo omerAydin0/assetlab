@@ -6,8 +6,13 @@
 // What a 3D build has instead of sprites: a mesh drawn through materials, each of
 // which is either a set of textures or a flat colour. Both are shown, because in
 // the 3D build here half the models are colour and no texture at all.
+const MATERIAL_SETS = __MATERIALS__;
 const MODELS = __MODELS__;
 const SCENES = __SCENES__;
+// A material set is shared by many models and is written into the page once; `mat`
+// is the index into that list. A build drawing twenty-six thousand meshes has about
+// two thousand distinct sets between them, which is two megabytes against thirty.
+for (const model of MODELS) model.materials = MATERIAL_SETS[model.mat] || [];
 
 function swatch(colour){
   return colour ? `<span class="swatch" style="background:${colour.hex}"

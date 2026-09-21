@@ -167,6 +167,10 @@ aside.wide{width:min(900px,96vw)}
 <aside id="panel"></aside>
 <script>
 const DATA = __DATA__, GAMES = __GAMES__;
+// `href` is written into the payload only when it differs from `img`; for an
+// image asset the two are the same string, and a build with a hundred
+// thousand of them paid twelve megabytes of page for repeating it.
+for (const d of DATA) if (!d.href) d.href = d.img;
 const F = ["role","feature","mechanic","type"];
 const el = id => document.getElementById(id);
 // _r is an asset's rank within its own build. The point of holding eight builds on
@@ -351,7 +355,7 @@ function render(reset){
       const assembled = SCENES.map((s, i) => [s, i]).filter(([s]) => games.has(s.g) &&
         (!query || s.name.toLowerCase().includes(query)));
       const lead = assembled.length
-        ? `<div class="scenehead">assembled prefabs</div>
+        ? `<div class="scenehead">assembled objects</div>
            <div class="scenestrip">${assembled.map(([s, i]) => sceneCard(s, i)).join("")}</div>
            <div class="scenehead">individual meshes</div>` : "";
       el("grid").innerHTML = lead +

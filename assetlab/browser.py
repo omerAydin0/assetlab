@@ -232,7 +232,12 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
         records.append({
             "n": row["name"], "p": row["rel_path"], "type": row["unity_type"],
             "w": row["width"], "h": row["height"], "b": row["size_bytes"],
-            "img": image_href, "t": thumb, "kind": kind, "href": href, "ex": excerpt,
+            # `href` is written only when it differs from `img`. For an image the
+            # two are the same string, and a build with a hundred thousand of them
+            # paid twelve megabytes of page for saying so twice; the page falls
+            # back to `img` when `href` is absent.
+            "img": image_href, "t": thumb, "kind": kind,
+            "href": None if href == image_href else href, "ex": excerpt,
             "dup": row["duplicate_group"], "role": row["primary_role"],
             "feature": row["primary_feature"], "mechanic": row["primary_mechanic"],
             "obstacle": row["id"] in obstacles, "sub": subcategory.get(row["id"]),
@@ -310,6 +315,8 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
     # sprites are, so a model's surface loads from the same folders as everything
     # else on the page.
     models: list[dict] = []
+    material_list: list = []
+    material_sets: dict[str, int] = {}
     try:
         for row in conn.execute(
             """SELECT prefab_id, prefab_name, path, object_name, mesh_name,
@@ -326,11 +333,22 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
                 "placements": row["placements"], "key": row["object_key"],
                 "materials": json.loads(row["materials"]) if row["materials"] else [],
             }
+            # Written out once and referenced, not repeated per model. A build
+            # draws twenty-six thousand meshes with two thousand distinct material
+            # sets between them, which is twenty-nine megabytes of page against
+            # two.
             for material in entry["materials"]:
                 for texture in material.get("textures", []):
                     path = texture.get("img")
                     if path and not path.startswith("sprites/"):
                         texture["img"] = (assets_root / path).as_uri()
+            shared = json.dumps(entry["materials"], sort_keys=True,
+                                separators=(",", ":"))
+            if shared not in material_sets:
+                material_sets[shared] = len(material_list)
+                material_list.append(entry["materials"])
+            entry["mat"] = material_sets[shared]
+            del entry["materials"]
             models.append(entry)
     except sqlite3.OperationalError:
         pass                      # models stage not run for this catalogue
@@ -361,6 +379,9 @@ def build(out_dir: Path, assets_root: Path, title: str, conn: sqlite3.Connection
                 .replace("__MODEL_VIEW__", MODEL_VIEW)
                 .replace("__SHARED_VIEWS__", SHARED_VIEWS)
                 .replace("__DATA__", payload)
+                .replace("__MATERIALS__", json.dumps(material_list,
+                                                     ensure_ascii=False,
+                                                     separators=(",", ":")))
                 .replace("__MODELS__", json.dumps(models, ensure_ascii=False,
                                                   separators=(",", ":")))
                 .replace("__SCENES__", json.dumps(scenes, ensure_ascii=False,
