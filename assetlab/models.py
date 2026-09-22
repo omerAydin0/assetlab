@@ -60,10 +60,16 @@ ANY_COLOR_RE = re.compile(
     r"^      _(\w+):\s*\{r:\s*([\d.eE+-]+),\s*"
     r"g:\s*([\d.eE+-]+),\s*b:\s*([\d.eE+-]+),\s*a:\s*([\d.eE+-]+)\}", re.M)
 
-#: Tried in order. A shader that ramps between two colours states both, and the
-#: thing's colour is between them; a conventional one states one and means it.
-COLOR_PREFERENCE = (("Color1", "Color2"), ("TopColor1", "TopColor2"),
-                    ("BaseColor",), ("Color",), ("TintColor",), ("MainColor",))
+#: Tried in order, and only on a material whose surface is a texture or a colour
+#: rather than something the shader builds for itself.
+COLOR_PREFERENCE = (("BaseColor",), ("Color",), ("TintColor",), ("MainColor",))
+
+#: The slots a shader binds its albedo to when it has one. A material that binds
+#: textures and none of these is painting with something else - a mask, a ramp, a
+#: noise field - and its colour properties are that shader's parameters, not the
+#: colour of the thing.
+ALBEDO_SLOTS = {"maintex", "basemap", "basecolormap", "albedo", "albedomap",
+                "diffuse", "diffusemap", "maintexture", "basetex"}
 
 LOCAL_POS_RE = re.compile(
     r"^  m_LocalPosition:\s*\{x:\s*([-\d.eE+]+),\s*y:\s*([-\d.eE+]+),\s*z:\s*([-\d.eE+]+)\}", re.M)
@@ -154,6 +160,17 @@ def parse_material(text: str, linear: bool = False) -> dict:
                      for i in range(3)]
             picked = (mixed, present[0][1])
             break
+
+    # Two attempts at reading a stylised shader's colour both produced confident
+    # nonsense - an orange moss vine from `_BaseColor`, a purple ivy from the ramp
+    # endpoints - because in those shaders neither is the colour of anything. What
+    # is observable is whether the material binds an albedo at all. Where it does
+    # not and still binds textures, the shader is building colour itself and no
+    # colour is claimed; the shape is drawn plain, which is true.
+    bound = {slot.lower().lstrip("_") for slot in
+             (entry["slot"] for entry in textures)}
+    if textures and not (bound & ALBEDO_SLOTS):
+        picked = None
 
     colour = None
     if picked:
