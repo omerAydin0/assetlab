@@ -493,7 +493,15 @@ def render(pieces: list[Piece], size: int = 384,
         world.append((piece, points, normals))
 
     # One reading of "up" for the whole assembly, so a hat stays on the head.
-    axis, sign = up_axis(np.concatenate([p for _, p, _ in world], axis=0))
+    if all(piece.transform is not None for piece in pieces):
+        # Placed by a world transform, and Unity's world up is +Y, so there is
+        # nothing to guess. The guess decides which end is the base by which end is
+        # wider, which is right for a statue and upside down for a tree: a willow
+        # was drawn hanging, its canopy reading as a bowl and its trunk as a stalk
+        # coming out of the top.
+        axis, sign = 1, 1.0
+    else:
+        axis, sign = up_axis(np.concatenate([p for _, p, _ in world], axis=0))
 
     placed = []
     for piece, points, normals in world:
