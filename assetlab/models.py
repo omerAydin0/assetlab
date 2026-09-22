@@ -30,7 +30,7 @@ import sqlite3
 from pathlib import Path
 
 from .core import connect, stream_documents
-from .mesh import Piece, parse_mesh, render
+from .mesh import CUTOUT_ALPHA, Piece, parse_mesh, render
 
 DOC_RE = re.compile(r"^--- !u!(\d+) &(-?\d+)", re.M)
 NAME_RE = re.compile(r"^  m_Name:\s*(.*?)\s*$", re.M)
@@ -444,6 +444,10 @@ def parse_scene_objects(path: Path, cap: int = SCENE_SEGMENT_CAP) -> list[dict]:
     return objects
 
 
+#: How much of a mask has to be transparent before it is worth keying on. Below
+#: this it is a solid texture that happens to carry an alpha channel.
+CUTOUT_MIN_SHARE = 0.05
+
 #: Sampling a 2048-square atlas per pixel is wasted work at thumbnail size, and a
 #: build can hold dozens of them at once.
 TEXTURE_SAMPLE = 512
@@ -466,6 +470,7 @@ class Renderer:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._meshes: dict[str, object] = {}
         self._textures: dict[str, object] = {}
+        self._cutouts: dict[str, object] = {}
 
     def mesh(self, rel_path: str | None):
         if not rel_path:
@@ -473,6 +478,36 @@ class Renderer:
         if rel_path not in self._meshes:
             self._meshes[rel_path] = parse_mesh(self.assets_root / rel_path)
         return self._meshes[rel_path]
+
+    def cutout(self, image_path: str | None):
+        """The alpha of a bound mask, when it has one worth keying on.
+
+        A stylised build binds no albedo, so its textures were being ignored
+        entirely - and one of them is the leaf shape. `Moss.png` is 92 per cent
+        transparent: read as alpha it is a hanging vine, ignored it is a bowl.
+        """
+        if image_path is None:
+            return None
+        if image_path not in self._cutouts:
+            found = None
+            try:
+                candidate = Path(image_path)
+                if not candidate.is_absolute():
+                    candidate = self.assets_root / image_path
+                with Image.open(candidate) as handle:
+                    if "A" in handle.getbands():
+                        alpha = handle.getchannel("A")
+                        if max(alpha.size) > TEXTURE_SAMPLE:
+                            alpha.thumbnail((TEXTURE_SAMPLE, TEXTURE_SAMPLE),
+                                            Image.NEAREST)
+                        array = np.asarray(alpha)
+                        # A fully opaque mask keys nothing and would only cost time.
+                        if float((array <= CUTOUT_ALPHA).mean()) > CUTOUT_MIN_SHARE:
+                            found = array
+            except (OSError, ValueError):
+                found = None
+            self._cutouts[image_path] = found
+        return self._cutouts[image_path]
 
     def texture(self, image_path: str | None):
         """The bound atlas, shrunk to sampling size. None when it cannot be read."""
@@ -516,7 +551,21 @@ class Renderer:
             # leaves surfaces to the shader.
             if (detail.get("colour") or {}).get("rgb"):
                 colour = tuple(detail["colour"]["rgb"])
-        return Piece(mesh=mesh, transform=matrix, colour=colour, texture=texture)
+        # Where no albedo was bound, one of the masks may still be the shape. The
+        # most transparent one is the one the shader keys on.
+        cutout = None
+        if texture is None:
+            best = 0.0
+            for detail in details:
+                for bound in detail.get("textures") or ():
+                    found = self.cutout(bound.get("src") or bound.get("img"))
+                    if found is None:
+                        continue
+                    share = float((found <= CUTOUT_ALPHA).mean())
+                    if share > best:
+                        best, cutout = share, found
+        return Piece(mesh=mesh, transform=matrix, colour=colour, texture=texture,
+                     cutout=cutout)
 
     def draw(self, pieces: list, name: str, size: int = 320) -> str | None:
         pieces = [x for x in pieces if x is not None]

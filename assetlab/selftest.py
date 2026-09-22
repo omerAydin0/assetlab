@@ -937,6 +937,31 @@ def vocabulary_noise_checks() -> None:
               bool(NON_BOARD_ENUM_RE.search(gameplay_enum)), False)
 
 
+def cutout_checks() -> None:
+    """A leaf is a hole in a quad; drawn opaque a bush comes out as a stack of plates."""
+    import numpy as np
+    from .mesh import Piece, render
+
+    points = np.array([[-1, -1, 0], [1, -1, 0], [1, 1, 0], [-1, 1, 0]], dtype=np.float32)
+    faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+    uvs = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+    mesh = types.SimpleNamespace(vertices=points, triangles=faces, normals=None,
+                                 uvs=uvs, submesh_ranges=[], bindpose=None)
+    # Opaque border, transparent middle: the quad has to come out as a frame.
+    mask = np.full((64, 64), 255, dtype=np.uint8)
+    mask[16:48, 16:48] = 0
+
+    plain = render([Piece(mesh=mesh, transform=None, colour=(200, 200, 200),
+                          texture=None)], size=64)
+    keyed = render([Piece(mesh=mesh, transform=None, colour=(200, 200, 200),
+                          texture=None, cutout=mask)], size=64)
+    background = np.array([14, 16, 20])
+    filled = [int((np.abs(np.asarray(i.convert("RGB")).astype(int) - background)
+                   .sum(axis=2) > 24).sum()) for i in (plain, keyed)]
+    check("without the mask the quad draws solid", filled[0] > 150, True)
+    check("with it the middle is cut away", filled[1] < filled[0] * 0.75, True)
+
+
 def corpus_checks() -> None:
     """Three answers about levels, not two."""
     with tempfile.TemporaryDirectory() as temporary:
@@ -2419,6 +2444,7 @@ SkinnedMeshRenderer:""").replace("--- !u!23 &2300\nMeshRenderer:",
     cross_scene_merge_checks()
     solid_surface_checks()
     dark_subject_checks()
+    cutout_checks()
     placeholder_checks()
     vocabulary_noise_checks()
     derived_schema_checks()

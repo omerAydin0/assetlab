@@ -404,8 +404,15 @@ class Piece:
     transform: np.ndarray | None = None       # 4x4, world placement
     colour: tuple[int, int, int] = (150, 155, 165)
     texture: Image.Image | None = None
+    #: Alpha of the mask a cutout shader keys on, as a 2D array. Foliage is built
+    #: from quads with the leaf shape in the alpha channel; drawn opaque, a bush
+    #: comes out as a stack of plates.
+    cutout: object | None = None
     submesh: int | None = None                # which submesh this piece covers
 
+
+#: Where a cutout shader puts its edge. Unity's own default is 0.5 of 255.
+CUTOUT_ALPHA = 127
 
 LIGHT = np.array([0.35, 0.75, 0.55], dtype=np.float32)
 LIGHT /= np.linalg.norm(LIGHT)
@@ -600,6 +607,17 @@ def _rasterise(triangles, screen, normals, piece, base,
         inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
         if not inside.any():
             continue
+
+        if piece.cutout is not None and uvs is not None:
+            uv = (w0[..., None] * uvs[tri[0]] + w1[..., None] * uvs[tri[1]]
+                  + w2[..., None] * uvs[tri[2]])
+            height, width = piece.cutout.shape[:2]
+            mx = np.clip((uv[..., 0] % 1.0) * (width - 1), 0, width - 1).astype(np.int32)
+            my = np.clip((1.0 - uv[..., 1] % 1.0) * (height - 1), 0,
+                         height - 1).astype(np.int32)
+            inside = inside & (piece.cutout[my, mx] > CUTOUT_ALPHA)
+            if not inside.any():
+                continue
 
         depth = w0 * p0[2] + w1 * p1[2] + w2 * p2[2]
         region = depth_buffer[y0:y1 + 1, x0:x1 + 1]
