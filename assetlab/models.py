@@ -52,9 +52,18 @@ TEX_SLOT_RE = re.compile(
     re.M)
 # Colours sit under m_Colors, one per line and without a list dash. _BaseColor is
 # the URP name, _Color the built-in one; a material usually carries both.
-COLOR_RE = re.compile(
-    r"^      _(BaseColor|Color|TintColor|MainColor):\s*\{r:\s*([\d.eE+-]+),\s*"
+#: Every colour a material carries, whatever it is called. Which one means "the
+#: colour of this thing" is not fixed: a build with stylised shaders passes ramp
+#: endpoints, hue shifts and HDR emission through the same block, and one of them
+#: was being read as the answer - a moss vine whose `_BaseColor` is orange.
+ANY_COLOR_RE = re.compile(
+    r"^      _(\w+):\s*\{r:\s*([\d.eE+-]+),\s*"
     r"g:\s*([\d.eE+-]+),\s*b:\s*([\d.eE+-]+),\s*a:\s*([\d.eE+-]+)\}", re.M)
+
+#: Tried in order. A shader that ramps between two colours states both, and the
+#: thing's colour is between them; a conventional one states one and means it.
+COLOR_PREFERENCE = (("Color1", "Color2"), ("TopColor1", "TopColor2"),
+                    ("BaseColor",), ("Color",), ("TintColor",), ("MainColor",))
 
 LOCAL_POS_RE = re.compile(
     r"^  m_LocalPosition:\s*\{x:\s*([-\d.eE+]+),\s*y:\s*([-\d.eE+]+),\s*z:\s*([-\d.eE+]+)\}", re.M)
@@ -63,6 +72,14 @@ LOCAL_ROT_RE = re.compile(
     r"\s*z:\s*([-\d.eE+]+),\s*w:\s*([-\d.eE+]+)\}", re.M)
 LOCAL_SCALE_RE = re.compile(
     r"^  m_LocalScale:\s*\{x:\s*([-\d.eE+]+),\s*y:\s*([-\d.eE+]+),\s*z:\s*([-\d.eE+]+)\}", re.M)
+
+#: An LODGroup lists the renderers for each level of detail and shows exactly one
+#: of them at a time. Drawing all of them puts four versions of a tree in the same
+#: place, which is what a willow looked like: a mush.
+LOD_GROUP = 205
+LOD_LEVEL_RE = re.compile(r"^\s{2}- serializedVersion: \d+\s*$|^\s{2}- screenRelativeHeight:",
+                          re.M)
+RENDERER_REF_RE = re.compile(r"renderer: \{fileID: (-?\d+)\}")
 
 MESH_FILTER = 33
 MESH_RENDERER = 23
@@ -121,11 +138,27 @@ def parse_material(text: str, linear: bool = False) -> dict:
         if file_id != "0" and guid:
             textures.append({"slot": slot, "guid": guid})
 
+    # A channel above one is an HDR value - emission, a hue shift, a ramp
+    # multiplier - and never a swatch. `_Color0: {r: 4, ...}` is a real example.
+    stated = {}
+    for name, red, green, blue, alpha in ANY_COLOR_RE.findall(text):
+        values = [float(red), float(green), float(blue)]
+        if all(0.0 <= v <= 1.0 for v in values):
+            stated[name] = (values, float(alpha))
+
+    picked = None
+    for group in COLOR_PREFERENCE:
+        present = [stated[n] for n in group if n in stated]
+        if len(present) == len(group):
+            mixed = [sum(entry[0][i] for entry in present) / len(present)
+                     for i in range(3)]
+            picked = (mixed, present[0][1])
+            break
+
     colour = None
-    found = COLOR_RE.search(text)
-    if found:
-        red, green, blue, alpha = (float(found.group(i)) for i in range(2, 6))
-        channels = [to_display(c, linear) for c in (red, green, blue)]
+    if picked:
+        values, alpha = picked
+        channels = [to_display(c, linear) for c in values]
         colour = {
             "hex": "#{:02x}{:02x}{:02x}".format(*channels),
             "rgb": channels,
@@ -143,6 +176,8 @@ def _collect(documents) -> tuple:
     """
     names: dict[str, str] = {}
     transforms: dict[str, dict] = {}
+    renderer_owner: dict[str, str] = {}   # renderer fileID -> its GameObject
+    lod_groups: list[str] = []            # the body of each LODGroup document
     meshes: dict[str, str] = {}          # gameObject -> mesh guid
     materials: dict[str, list[str]] = {}  # gameObject -> material guids
     skinned: set[str] = set()
@@ -182,12 +217,32 @@ def _collect(documents) -> tuple:
                 bone = FIRST_BONE_RE.search(body) or ROOT_BONE_RE.search(body)
                 if bone and bone.group(1) != "0":
                     root_bones[owner.group(1)] = bone.group(1)
+        elif class_id == LOD_GROUP:
+            lod_groups.append(body)
         if class_id in (MESH_RENDERER, SKINNED_MESH_RENDERER):
             owner = GAMEOBJECT_RE.search(body)
+            if owner:
+                renderer_owner[_file_id] = owner.group(1)
             block = MATERIALS_RE.search(body)
             if owner and block:
                 materials.setdefault(owner.group(1), []).extend(
                     GUID_RE.findall(block.group(1)))
+
+    # Everything below the first level is a cheaper copy of the same thing in the
+    # same place, so it is dropped rather than drawn on top.
+    lod_hidden: set[str] = set()
+    for body in lod_groups:
+        levels = LOD_LEVEL_RE.split(body)[1:]
+        first: set[str] = set()
+        for index, level in enumerate(levels):
+            owners = {renderer_owner[r] for r in RENDERER_REF_RE.findall(level)
+                      if r in renderer_owner}
+            if index == 0:
+                first = owners
+            else:
+                lod_hidden |= owners - first
+    for gameobject in lod_hidden:
+        meshes.pop(gameobject, None)
 
     return names, transforms, meshes, materials, skinned, root_bones
 

@@ -529,7 +529,12 @@ def render(pieces: list[Piece], size: int = 384,
 #: What the brightest part of a subject should reach, and how far the picture may
 #: be lifted to get it there. A cap matters: without one, a genuinely black object
 #: is amplified into grey noise and claims detail it does not have.
-EXPOSURE_TARGET = 190.0
+#: Only a picture darker than the floor is lifted, and only as far as the floor.
+#: Lifting everything to one target was worse than the problem: it pushed every
+#: flat-coloured rock to near-white and threw away the difference between a pale
+#: one and a dark one.
+EXPOSURE_FLOOR = 70.0
+EXPOSURE_TARGET = 120.0
 #: Measured, not chosen: the darkest rock in a real build sat at a 95th-percentile
 #: brightness of 22 against a target of 190, so it needs 8.6. Ten leaves a little
 #: room and still refuses to make something out of a subject that is truly black.
@@ -553,7 +558,7 @@ def _expose(colour_buffer, depth_buffer, background) -> None:
     # The 95th percentile rather than the maximum: one specular pixel should not
     # decide the exposure for the whole thing.
     brightest = float(np.percentile(subject.max(axis=1), 95))
-    if brightest <= 1.0 or brightest >= EXPOSURE_TARGET:
+    if brightest <= 1.0 or brightest >= EXPOSURE_FLOOR:
         return
     gain = min(EXPOSURE_TARGET / brightest, EXPOSURE_MAX_GAIN)
     colour_buffer[drawn] = np.clip(subject * gain, 0, 255)
